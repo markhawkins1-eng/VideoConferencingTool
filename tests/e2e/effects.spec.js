@@ -6,34 +6,36 @@ async function pick(page, selector) {
   await page.click(selector);
   await expect(page.locator(selector)).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('#effects-msg')).not.toHaveText(/Loading/, { timeout: 30_000 });
-  await page.waitForTimeout(1500); // let processed frames reach the peer
 }
+
+// The peer's video lags the switch by a variable amount (encoder ramp-up, slow CI
+// machines), so poll what the peer actually receives instead of sleeping.
+const receives = (page, predicate, message) =>
+  expect.poll(async () => predicate(await sampleRemote(page)), { message, timeout: 20_000, intervals: [250] }).toBe(true);
 
 const close = (rgb, target, tol = 25) => rgb.every((v, i) => Math.abs(v - target[i]) <= tol);
 
 test('backgrounds, blur, camera off and uploaded images reach the other person', async ({ server, newDevice }) => {
   const { a, b } = await connectedPair(newDevice, server);
-  await b.waitForTimeout(800);
+  await receives(b, (f) => f.width > 0 && f.rgb[1] > 120, 'peer sees the green test pattern');
   const plain = await sampleRemote(b);
-  expect(plain.rgb[1]).toBeGreaterThan(120); // green test pattern
 
   await a.click('#effects-toggle');
   await expect(a.locator('#effects-grid .tile')).toHaveCount(8);
 
   await pick(a, '[data-preset="sunset"]');
-  expect(close((await sampleRemote(b)).rgb, [131, 60, 88])).toBe(true);
+  await receives(b, (f) => close(f.rgb, [131, 60, 88]), 'peer sees the sunset background');
   // Self-view shows the processed video too.
   expect(await a.evaluate(() => document.querySelector('#local').paused)).toBe(false);
 
   await pick(a, '[data-preset="office"]');
-  expect(close((await sampleRemote(b)).rgb, [215, 217, 211])).toBe(true);
+  await receives(b, (f) => close(f.rgb, [215, 217, 211]), 'peer sees the office background');
 
   await pick(a, '[data-effect="privacy"]');
-  expect((await sampleRemote(b)).sharp).toBeLessThan(plain.sharp * 0.6);
+  await receives(b, (f) => f.rgb[1] > 100 && f.sharp < plain.sharp * 0.6, 'peer sees a blurred picture');
 
   await a.click('#camera');
-  await a.waitForTimeout(1200);
-  expect((await sampleRemote(b)).rgb).toEqual([0, 0, 0]);
+  await receives(b, (f) => f.rgb.every((v) => v === 0), 'peer sees black with the camera off');
   await a.click('#camera');
 
   const png = await a.evaluate(() => {
@@ -46,11 +48,10 @@ test('backgrounds, blur, camera off and uploaded images reach the other person',
   });
   await a.setInputFiles('#effects-upload', { name: 'bg.png', mimeType: 'image/png', buffer: Buffer.from(png, 'base64') });
   await expect(a.locator('[data-effect="image"]:not([data-preset])')).toHaveAttribute('aria-pressed', 'true');
-  await a.waitForTimeout(1500);
-  expect(close((await sampleRemote(b)).rgb, [16, 64, 255], 30)).toBe(true);
+  await receives(b, (f) => close(f.rgb, [16, 64, 255], 30), 'peer sees the uploaded image');
 
   await pick(a, '[data-effect="none"]');
-  expect((await sampleRemote(b)).rgb[1]).toBeGreaterThan(120);
+  await receives(b, (f) => f.rgb[1] > 120 && f.sharp > plain.sharp * 0.6, 'peer sees the plain camera again');
 });
 
 for (const [name, init] of [
@@ -62,12 +63,12 @@ for (const [name, init] of [
     const b = await newDevice();
     await b.goto(await startCall(a, server));
     await expect(b.locator('#status')).toHaveText(/^Connected/);
-    await b.waitForTimeout(800);
+    await receives(b, (f) => f.width > 0 && f.rgb[1] > 120, 'peer sees the green test pattern');
     const plain = await sampleRemote(b);
     await a.click('#effects-toggle');
     await pick(a, '[data-effect="privacy"]');
     expect(await a.evaluate(() => effects.hasFilter)).toBe(false);
-    expect((await sampleRemote(b)).sharp).toBeLessThan(plain.sharp * 0.6);
+    await receives(b, (f) => f.rgb[1] > 100 && f.sharp < plain.sharp * 0.6, 'peer sees a blurred picture');
   });
 }
 
