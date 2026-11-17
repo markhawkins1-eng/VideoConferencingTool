@@ -2,14 +2,11 @@
   "name": "videoconf",
   "version": "1.0.0",
   "private": true,
-  "description": "Peer-to-peer, end-to-end encrypted video calls (WebRTC + encrypted signaling)",
-  "main": "server.js",
+  "description": "Web client assets for VideoConf. The server is Python: see server/.",
   "scripts": {
-    "start": "node server.js"
+    "start": "cd server && ../.venv/bin/python -m videoconf"
   },
   "dependencies": {
-    "@mediapipe/tasks-vision": "1.2.0",
-    "nodemailer": "^6.10.1",
-    "ws": "^8.23.0"
+    "@mediapipe/tasks-vision": "1.2.0"
   }
 }

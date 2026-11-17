@@ -24,6 +24,7 @@ const myId = b64u.enc(crypto.getRandomValues(new Uint8Array(12)));
 let key, roomId, ws, pc, localStream, config, pendingCandidates = [], statsTimer;
 // sendStream holds what we transmit: mic audio + either the raw camera or the effects-processed video.
 let sendStream, effects;
+let iceServers = [], iceTimer, reconnectTimer, reconnectDelay = 1000, leaving = false;
 
 function setStatus(text, ok = false) {
   $('status').textContent = text;
@@ -72,7 +73,7 @@ function newPeerConnection() {
   $('security').hidden = true;
   $('remote').srcObject = null;
 
-  pc = new RTCPeerConnection({ iceServers: config.iceServers });
+  pc = new RTCPeerConnection({ iceServers });
   sendStream.getTracks().forEach((t) => pc.addTrack(t, sendStream));
 
   pc.onicecandidate = (e) => e.candidate && sendSignal({ candidate: e.candidate.toJSON() });
@@ -140,16 +141,17 @@ async function showSecurity() {
   statsTimer = setInterval(update, 5000);
 }
 
-// ---------- signaling connection ----------
+// ---------- signaling connection (Python service) ----------
 
 function connect() {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
-  ws.onopen = () => ws.send(JSON.stringify({ type: 'join', room: roomId }));
+  clearTimeout(reconnectTimer);
+  ws = VideoConfApi.openSignaling(roomId);
+  let full = false;
   ws.onmessage = async (e) => {
     const msg = JSON.parse(e.data);
     try {
       if (msg.type === 'joined') {
+        reconnectDelay = 1000;
         setStatus(msg.peers === 1 ? 'Waiting for the other person…' : 'Connecting…');
       } else if (msg.type === 'peer-joined') {
         setStatus('Connecting…');
@@ -160,6 +162,7 @@ function connect() {
         setStatus('The other person left. Waiting…');
         newPeerConnection();
       } else if (msg.type === 'full') {
+        full = true;
         setStatus('This call already has two people');
       }
     } catch (err) {
@@ -167,8 +170,21 @@ function connect() {
     }
   };
   ws.onclose = () => {
-    if (!$('call').hidden && $('status').textContent !== 'This call already has two people') setStatus('Signaling disconnected');
+    if (leaving || full) return;
+    // Media already flowing is peer to peer and survives a server blip; the
+    // signaling channel just needs to come back for reconnects and renegotiation.
+    if (!pc || pc.connectionState !== 'connected') setStatus('Reconnecting to the call server…');
+    reconnectTimer = setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 15000);
   };
+}
+
+async function refreshIceServers() {
+  const res = await VideoConfApi.getIceServers();
+  iceServers = res.iceServers;
+  // Short-lived TURN credentials: fetch fresh ones before they expire.
+  clearTimeout(iceTimer);
+  if (res.ttl) iceTimer = setTimeout(() => refreshIceServers().catch(() => {}), (res.ttl * 1000) / 2);
 }
 
 // ---------- UI ----------
@@ -180,8 +196,21 @@ async function startCall(s) {
     setStatus('Needs HTTPS (or localhost)');
     return false;
   }
-  secret = s;
-  ({ roomId, key } = await deriveKeys(secret));
+  ({ roomId, key } = await deriveKeys(s));
+  // Ask the call server first, so nobody is prompted for a camera to join a full call.
+  try {
+    const room = await VideoConfApi.getRoom(roomId);
+    if (!room.joinable) {
+      setStatus('This call already has two people');
+      lobbyMsg('This call already has two people. Ask the person who invited you for a new link, or start your own call.');
+      return false;
+    }
+    await refreshIceServers();
+  } catch (err) {
+    setStatus('Server unavailable');
+    lobbyMsg(err.message + ' Check your connection and try again.');
+    return false;
+  }
   try {
     localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
   } catch (err) {
@@ -189,6 +218,7 @@ async function startCall(s) {
     alert('Could not access camera or microphone: ' + err.message);
     return false;
   }
+  secret = s; // only once the call has really started
   $('lobby').hidden = true;
   $('call').hidden = false;
   $('call-invite-slot').append($('invite-form'));
@@ -252,13 +282,7 @@ $('invite-form').onsubmit = async (e) => {
   $('invite-send').disabled = true;
   inviteMsg('Sending…');
   try {
-    const res = await fetch('/api/invite', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...inv, secret }),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
+    await VideoConfApi.sendInvite({ ...inv, secret });
     afterInvite(inv.to);
   } catch (err) {
     inviteMsg(err.message, 'error');
@@ -306,6 +330,9 @@ $('mute').onclick = () => toggleTrack('audio', $('mute'), 'Mute', 'Unmute');
 $('camera').onclick = () => toggleTrack('video', $('camera'), 'Camera off', 'Camera on');
 
 $('hangup').onclick = () => {
+  leaving = true;
+  clearTimeout(reconnectTimer);
+  clearTimeout(iceTimer);
   ws && ws.close();
   pc && pc.close();
   localStream && localStream.getTracks().forEach((t) => t.stop());
@@ -499,15 +526,29 @@ $('effects-toggle').onclick = () => {
 
 // ---------- boot ----------
 
+function lobbyMsg(text) {
+  $('lobby-msg').textContent = text;
+  $('lobby-msg').hidden = !text;
+}
+
 (async () => {
-  config = await (await fetch('/config.json')).json();
+  try {
+    config = await VideoConfApi.getConfig();
+  } catch (err) {
+    setStatus('Server unavailable');
+    lobbyMsg(err.message + ' Reload the page to try again.');
+    $('create').disabled = true;
+    $('lobby-invite-slot').append($('invite-form'));
+    $('invite-send').disabled = $('invite-mailto').disabled = true;
+    return;
+  }
   if (!config.emailEnabled) {
     $('invite-send').hidden = true;
     $('invite-mailto').classList.add('primary');
   }
   const fromUrl = location.hash.slice(1);
   if (/^[A-Za-z0-9_-]{22}$/.test(fromUrl)) {
-    startCall(fromUrl);
+    if (!(await startCall(fromUrl))) $('lobby-invite-slot').append($('invite-form'));
   } else {
     $('lobby-invite-slot').append($('invite-form'));
   }

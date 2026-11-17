@@ -1,23 +1,42 @@
 # VideoConf
 
-One-to-one, end-to-end encrypted video calls in the browser, with email invites.
+One-to-one, end-to-end encrypted video calls in the browser, with email invites and on-device video effects.
+
+- **Python service** (`server/`, FastAPI): manages connections, meaning rooms, admission, signaling relay,
+  STUN/TURN credentials and email invites.
+- **Web client** (`public/`): the UI, WebRTC media and all encryption. Keys never leave the browsers, so the
+  server can't see or hear calls.
+
+Design, call flow, encryption model and API reference: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
 ## Run
 
+Requires Python 3.11+ and Node.js. Node only downloads the browser-side effects library; no Node server runs.
+
 ```bash
-cd VideoConferencingTool
+python3 -m venv .venv
+.venv/bin/pip install -r server/requirements.txt
 npm install
-MAIL_LOG=1 npm start      # http://localhost:8443 — invite emails are printed to the console
+cd server && MAIL_LOG=1 ../.venv/bin/python -m videoconf   # http://localhost:8443, invites printed to console
 ```
 
-Camera access needs HTTPS (or `localhost`). For real use, serve over TLS and configure SMTP:
+Camera access needs HTTPS (or `localhost`). For real use, serve over TLS and configure SMTP and TURN:
 
 ```bash
+cd server
 TLS_CERT=cert.pem TLS_KEY=key.pem PORT=443 \
 PUBLIC_URL=https://call.example.com \
-SMTP_HOST=smtp.example.com SMTP_PORT=587 SMTP_USER=apikey SMTP_PASS=... \
+SMTP_HOST=smtp.example.com SMTP_USER=apikey SMTP_PASS=... \
 MAIL_FROM="Private Call <invites@example.com>" \
-npm start
+TURN_URLS=turn:turn.example.com:3478 TURN_SECRET=... \
+../.venv/bin/python -m videoconf
+```
+
+### Tests
+
+```bash
+.venv/bin/pip install -r server/requirements-dev.txt
+cd server && ../.venv/bin/python -m pytest
 ```
 
 ## Using it
@@ -72,35 +91,35 @@ Cross-browser details handled in `public/effects.js`:
 
 ## How it's secured
 
-| Layer | Protection |
-|---|---|
-| Media | WebRTC DTLS-SRTP, sent directly between the two browsers. |
-| Signaling | Every SDP/ICE message is AES-256-GCM encrypted with a key derived (HKDF) from a 128-bit secret in the link's `#fragment`. Browsers never send the fragment, so the server sees only an opaque room ID and ciphertext. |
-| Verification | A 12-digit safety code hashed from both DTLS certificate fingerprints. Matching codes mean nobody is intercepting. |
-| Room | Two people at most. A third person is turned away. |
+| Layer | Who does it | Protection |
+|---|---|---|
+| Media | Browsers | WebRTC DTLS-SRTP, sent directly between the two browsers. TURN, if used, relays only ciphertext. |
+| Signaling | Browsers encrypt; Python relays | AES-256-GCM with a key derived (HKDF) from a 128-bit secret in the link's `#fragment`. The server sees only an opaque room ID and ciphertext. |
+| Verification | Users | A 12-digit safety code from both DTLS fingerprints. Matching codes mean no one is intercepting. |
+| Admission | Python | Two people per call. Guests learn a call is full before being asked for their camera. |
 
-**Email trade-off:** with **Send invite**, the call link passes through this server once so it can be
-emailed, and it also sits in both mailboxes. A compromised server or mailbox could try to join or intercept,
-and the safety code is what catches that. **Use my email app** keeps the link off this server completely.
+**Email trade-off:** with **Send invite**, the call link passes through the server once so it can be emailed.
+**Use my email app** keeps it off the server completely. Either way, compare the safety code.
 
-Invite endpoint hardening: same-origin JSON only, the server builds the link itself (only the secret is
-accepted, so it can't be used to email arbitrary URLs), one recipient per request, HTML-escaped content,
-and a per-IP limit (default 5 invites per 15 minutes).
+More detail, including server hardening, is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Config (env vars)
+## Config (environment variables)
 
 | Variable | Purpose |
 |---|---|
-| `PORT` | Default `8443` |
+| `HOST`, `PORT` | Listen address. Default `0.0.0.0:8443` |
 | `TLS_CERT`, `TLS_KEY` | PEM files for HTTPS |
-| `PUBLIC_URL` | Base URL used in invite links. Set it in production; otherwise the request's `Host` header is used. |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` | Outgoing mail server. Port 465 uses implicit TLS; others require STARTTLS. |
-| `MAIL_FROM` | Sender, e.g. `Private Call <invites@example.com>` |
-| `MAIL_LOG=1` | Development: print invite emails to the console instead of sending them |
-| `INVITE_LIMIT` | Invites per IP per 15 minutes (default 5) |
-| `TRUST_PROXY=1` | Use `X-Forwarded-For` for rate limiting when behind a reverse proxy |
-| `STUN_URL` | Default Google STUN |
-| `TURN_URL`, `TURN_USERNAME`, `TURN_CREDENTIAL` | Optional TURN relay for strict NATs. It relays only encrypted packets. |
+| `PUBLIC_URL` | Base URL for invite links and allowed WebSocket origin behind a proxy |
+| `TRUST_PROXY=1` | Trust `X-Forwarded-*` headers for client IP and scheme |
+| `STUN_URLS` | Comma-separated. Default Google STUN |
+| `TURN_URLS` | Comma-separated TURN URLs, such as `turn:turn.example.com:3478,turns:turn.example.com:5349` |
+| `TURN_SECRET` | coturn `static-auth-secret`, used to issue short-lived credentials (recommended) |
+| `TURN_USERNAME`, `TURN_CREDENTIAL` | Fixed TURN credentials, used instead of `TURN_SECRET` |
+| `TURN_TTL` | TURN credential lifetime in seconds. Default 6 hours |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` | Outgoing mail. Port 465 uses implicit TLS; others require STARTTLS |
+| `MAIL_FROM` | Sender, such as `Private Call <invites@example.com>` |
+| `MAIL_LOG=1` | Development: print invites instead of sending them |
+| `INVITE_LIMIT` | Invites per IP per 15 minutes. Default 5 |
 
 If neither `SMTP_HOST` nor `MAIL_LOG` is set, **Send invite** is hidden and only **Use my email app** is offered.
 
@@ -108,4 +127,5 @@ If neither `SMTP_HOST` nor `MAIL_LOG` is set, **Send invite** is hidden and only
 
 - Anyone who has the link can join while a spot is free. Check the safety code.
 - The endpoints are trusted. Encryption doesn't help against malware on either device.
-- Invite rate limits are kept in memory, so they reset when the server restarts.
+- Rooms and rate limits are kept in memory. Running more than one server instance needs sticky routing or a
+  shared store (see the architecture doc).

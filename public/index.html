@@ -15,6 +15,7 @@
   <section id="lobby">
     <p>Start an end-to-end encrypted, peer-to-peer video call with one other person.
        Enter their email and we’ll send them a link to join.</p>
+    <p id="lobby-msg" class="notice" role="alert" hidden></p>
     <div id="lobby-invite-slot"></div>
     <p class="or"><button id="create" class="link">Start without inviting</button></p>
   </section>
@@ -80,6 +81,7 @@
     <p id="invite-msg" class="hint" role="status"></p>
   </form>
 
+  <script src="api.js"></script>
   <script src="effects.js"></script>
   <script src="app.js"></script>
 </body>
