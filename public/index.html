@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Private Call</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Private Call</h1>
+    <span id="status" class="pill">Idle</span>
+  </header>
+
+  <section id="lobby">
+    <p>Start an end-to-end encrypted, peer-to-peer video call with one other person.
+       Enter their email and we’ll send them a link to join.</p>
+    <div id="lobby-invite-slot"></div>
+    <p class="or"><button id="create" class="link">Start without inviting</button></p>
+  </section>
+
+  <section id="call" hidden>
+    <div class="videos">
+      <figure><video id="remote" autoplay playsinline></video><figcaption>Peer</figcaption></figure>
+      <figure class="self"><video id="local" autoplay playsinline muted></video><figcaption>You</figcaption></figure>
+    </div>
+
+    <div id="security" class="card security" hidden>
+      <div>
+        <strong>Safety code:</strong> <span id="sas" class="sas"></span>
+        <p class="hint">Read this code to each other out loud. If it matches, nobody is intercepting the call.</p>
+      </div>
+      <div id="cipher" class="cipher"></div>
+    </div>
+
+    <div class="controls">
+      <button id="mute">Mute</button>
+      <button id="camera">Camera off</button>
+      <button id="hangup" class="danger">Hang up</button>
+    </div>
+
+    <details id="invite-panel" class="card">
+      <summary>Invite someone</summary>
+      <div id="call-invite-slot"></div>
+      <div class="share">
+        <input id="link" readonly aria-label="Call link">
+        <button id="copy">Copy link</button>
+      </div>
+    </details>
+  </section>
+
+  <!-- Moved into the lobby or the call view by app.js -->
+  <form id="invite-form" class="card invite" novalidate>
+    <label>Their email
+      <input id="invite-to" type="email" autocomplete="email" placeholder="friend@example.com" required>
+    </label>
+    <label><span>Your name <span class="opt">(shown in the email)</span></span>
+      <input id="invite-name" autocomplete="name" maxlength="60" placeholder="Alex">
+    </label>
+    <label><span>Message <span class="opt">(optional)</span></span>
+      <textarea id="invite-note" maxlength="500" rows="2" placeholder="Free to talk now?"></textarea>
+    </label>
+    <div class="actions">
+      <button id="invite-send" type="submit" class="primary">Send invite</button>
+      <button id="invite-mailto" type="button">Use my email app</button>
+    </div>
+    <p id="invite-msg" class="hint" role="status"></p>
+  </form>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "name": "videoconf",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Peer-to-peer, end-to-end encrypted video calls (WebRTC + encrypted signaling)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "nodemailer": "^6.10.1",
+    "ws": "^8.23.0"
+  }
+}
