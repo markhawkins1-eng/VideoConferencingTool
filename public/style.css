@@ -53,3 +53,4 @@ button:disabled { opacity:.6; cursor:default; }
 .icon-blur-strong::before { background: radial-gradient(circle at 50% 60%, #6b7a8f 0 22%, transparent 23%), linear-gradient(135deg,#8e9bb0,#cfd6e0); }
 .icon-privacy::before { background: radial-gradient(circle at 50% 55%, #9aa6b8 0 35%, #c9d1dc 60%); }
 .tile-remove { position:absolute; top:2px; right:2px; width:22px; height:22px; line-height:20px; border-radius:50%; background:rgba(0,0,0,.6); color:#fff; font-size:16px; }
+.notice { padding:10px 14px; border-radius:8px; border:1px solid var(--danger); color:var(--danger); background:var(--card); }
