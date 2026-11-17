@@ -13,6 +13,7 @@ ciphertext. See docs/ARCHITECTURE.md.
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 from pathlib import Path
@@ -20,13 +21,14 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import Settings
 from .ice import ice_servers
 from .invites import EMAIL_RE, SECRET_RE, Mailer, build_invite, one_line
+from .metrics import ConnectionCounter, Metrics
 from .ratelimit import SlidingWindowLimiter
 from .rooms import RoomFull, RoomManager
 
@@ -69,7 +71,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     rooms = RoomManager(settings.room_capacity)
     mailer = Mailer(settings)
     invite_limiter = SlidingWindowLimiter(settings.invite_limit, settings.invite_window)
-    app.state.settings, app.state.rooms, app.state.mailer = settings, rooms, mailer
+    ws_connect_limiter = SlidingWindowLimiter(settings.ws_connects_per_minute, 60)
+    room_check_limiter = SlidingWindowLimiter(settings.room_checks_per_minute, 60)
+    ws_open = ConnectionCounter(settings.ws_per_ip)
+    metrics = Metrics()
+    metrics.gauge("videoconf_active_rooms", "Rooms with at least one peer", lambda: rooms.stats()["activeRooms"])
+    metrics.gauge("videoconf_connected_peers", "Admitted peers", lambda: rooms.stats()["connectedPeers"])
+    metrics.gauge("videoconf_waiting_peers", "Peers waiting to be let in", lambda: rooms.stats()["waitingPeers"])
+    metrics.gauge("videoconf_calls_started_total", "Rooms created since start", lambda: rooms.total_calls)
+    metrics.gauge("videoconf_admissions_total", "Peers let in by a host", lambda: rooms.admitted)
+    metrics.gauge("videoconf_denials_total", "Peers turned away by a host", lambda: rooms.denied)
+    app.state.settings, app.state.rooms, app.state.mailer, app.state.metrics = settings, rooms, mailer, metrics
+
+    def rejected(reason: str) -> None:
+        metrics.inc("videoconf_rejections_total", "Requests refused, by reason", reason=reason)
 
     def client_ip(request: Request | WebSocket) -> str:
         if settings.trust_proxy:
@@ -106,6 +121,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def health():
         return {"status": "ok", **rooms.stats()}
 
+    @app.get("/metrics", include_in_schema=False)
+    async def prometheus(request: Request):
+        token = settings.metrics_token
+        given = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        if not token or not hmac.compare_digest(given.encode(), token.encode()):
+            return _error(404, "Not found")
+        return PlainTextResponse(metrics.render(), media_type="text/plain; version=0.0.4")
+
     @app.get(f"{API}/config", tags=["client"])
     async def config():
         """Static client configuration and feature flags."""
@@ -121,10 +144,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return ice_servers(settings)
 
     @app.get(f"{API}/rooms/{{room_id}}", tags=["connections"])
-    async def room_status(room_id: str):
+    async def room_status(room_id: str, request: Request):
         """Whether a call can be joined. Lets the page say 'full' before asking for the camera."""
         if not rooms.valid_id(room_id):
             return _error(400, "Bad room id")
+        if not room_check_limiter.allow(client_ip(request)):
+            rejected("room_check_rate")
+            return _error(429, "Too many requests. Try again shortly.")
         return rooms.info(room_id)
 
     @app.post(f"{API}/invites", status_code=202, tags=["invites"])
@@ -136,6 +162,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not same_origin(request):
             return _error(403, "Bad origin")
         if not invite_limiter.allow(client_ip(request)):
+            rejected("invite_rate")
             return _error(429, "Too many invites. Try again in a few minutes.")
         to = one_line(invite.to, 254)
         if not EMAIL_RE.match(to):
@@ -154,30 +181,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             await mailer.send(msg)
         except Exception as exc:  # don't leak SMTP details to clients
-            log.error("Invite email failed: %s", exc)
+            log.error("invite failed: %s", exc)
+            metrics.inc("videoconf_invites_total", "Invite emails, by result", result="failed")
             return _error(502, "Couldn’t send the email. Try “Use my email app” instead.")
+        metrics.inc("videoconf_invites_total", "Invite emails, by result", result="sent")
         return {"status": "sent"}
 
     # ---------- signaling ----------
 
     @app.websocket(f"{API}/rooms/{{room_id}}/ws")
     async def signaling(ws: WebSocket, room_id: str):
-        """Join a room and relay end-to-end encrypted signaling messages.
+        """Join a room, wait to be let in if someone is already there, and relay
+        end-to-end encrypted signaling messages.
 
-        Server -> client: joined{peers} | peer-joined | peer-left | signal{data} | full
-        Client -> server: signal{data}   (data is AES-GCM ciphertext; never decrypted here)
+        Server -> client: joined{peers,host} | waiting | knock{id,data} | knock-cancelled{id}
+                          | denied | peer-joined | peer-left | signal{data} | full
+        Client -> server: signal{data} (members) | knock{data} (waiting) | admit{id} | deny{id} (members)
+        All `data` values are AES-GCM ciphertext made in the browser; never decrypted here.
         """
         if not rooms.valid_id(room_id) or not same_origin(ws):
+            rejected("bad_request")
             await ws.close(code=1008)
             return
-        await ws.accept()
-        try:
-            peer_id = await rooms.join(room_id, ws)
-        except RoomFull:
-            await ws.send_json({"type": "full"})
-            await ws.close(code=4409)
+        ip = client_ip(ws)
+        if not ws_connect_limiter.allow(ip):
+            rejected("ws_connect_rate")
+            await ws.close(code=1013)
             return
+        if not ws_open.acquire(ip):
+            rejected("ws_per_ip")
+            await ws.close(code=1013)
+            return
+        peer_id = None
         try:
+            await ws.accept()
+            try:
+                peer_id = await rooms.join(room_id, ws)
+            except RoomFull:
+                rejected("room_full")
+                await ws.send_json({"type": "full"})
+                await ws.close(code=4409)
+                return
+            log.info("join room=%s peer=%s", room_id[:8], peer_id)
             while True:
                 raw = await ws.receive_text()
                 if len(raw) > settings.max_signal_bytes:
@@ -188,12 +233,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except ValueError:
                     await ws.close(code=1003)
                     break
-                if msg.get("type") == "signal" and isinstance(msg.get("data"), str):
-                    await rooms.relay(room_id, peer_id, msg["data"])
-        except WebSocketDisconnect:
+                if not isinstance(msg, dict):
+                    continue
+                kind, data = msg.get("type"), msg.get("data")
+                if kind == "signal" and isinstance(data, str):
+                    await rooms.relay(room_id, peer_id, data)
+                elif kind == "knock" and isinstance(data, str):
+                    await rooms.knock(room_id, peer_id, data)
+                elif kind in ("admit", "deny") and isinstance(msg.get("id"), str):
+                    log.info("%s room=%s guest=%s", kind, room_id[:8], msg["id"])
+                    await rooms.decide(room_id, peer_id, msg["id"], admit=kind == "admit")
+        except (WebSocketDisconnect, RuntimeError):  # RuntimeError: we closed it (e.g. denied)
             pass
         finally:
-            await rooms.leave(room_id, peer_id)
+            ws_open.release(ip)
+            if peer_id:
+                await rooms.leave(room_id, peer_id)
 
     # ---------- web client and effects assets ----------
 

@@ -52,6 +52,14 @@ class Settings:
     invite_limit: int = 5
     invite_window: int = 15 * 60
 
+    # Abuse protection (per client IP).
+    ws_per_ip: int = 20                 # concurrent signaling connections
+    ws_connects_per_minute: int = 60
+    room_checks_per_minute: int = 120
+
+    # Prometheus metrics at /metrics, only when a token is set (Authorization: Bearer <token>).
+    metrics_token: str | None = None
+
     public_dir: Path = REPO_ROOT / "public"
     models_dir: Path = REPO_ROOT / "models"
     node_modules_dir: Path = REPO_ROOT / "node_modules"
@@ -91,4 +99,8 @@ class Settings:
             mail_from=_env("MAIL_FROM", "Private Call <no-reply@localhost>"),
             mail_log=_env("MAIL_LOG") == "1",
             invite_limit=int(_env("INVITE_LIMIT", "5")),
+            ws_per_ip=int(_env("WS_PER_IP", "20")),
+            ws_connects_per_minute=int(_env("WS_CONNECTS_PER_MINUTE", "60")),
+            room_checks_per_minute=int(_env("ROOM_CHECKS_PER_MINUTE", "120")),
+            metrics_token=_env("METRICS_TOKEN"),
         )

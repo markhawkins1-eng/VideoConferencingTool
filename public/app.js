@@ -128,16 +128,28 @@ function fingerprint(sdp) {
 
 let currentCodeId = null;
 
+/** Safety code for two DTLS fingerprints: { id: full SHA-256 hex, display: '1234 5678 9012' }. */
+async function safetyCodeFor(fpA, fpB) {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode([fpA, fpB].sort().join('|'))));
+  // 48 bits -> 12 decimal digits, shown as 3 groups of 4.
+  const n = digest.slice(0, 6).reduce((acc, b) => acc * 256 + b, 0) % 1e12;
+  return { id: hex(digest), display: String(n).padStart(12, '0').replace(/(\d{4})(?=\d)/g, '$1 ') };
+}
+
+/** This device's fingerprint, in the same form as the SDP's a=fingerprint line. */
+function myFingerprint() {
+  const fp = identity.certificate && identity.certificate.getFingerprints && identity.certificate.getFingerprints()[0];
+  return fp ? `${fp.algorithm} ${fp.value}`.toUpperCase() : '';
+}
+
 async function showSecurity() {
   const local = fingerprint(pc.localDescription.sdp);
   const remote = fingerprint(pc.remoteDescription.sdp);
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode([local, remote].sort().join('|'))));
-  // 48 bits -> 12 decimal digits, shown as 3 groups of 4.
-  const n = digest.slice(0, 6).reduce((acc, b) => acc * 256 + b, 0) % 1e12;
-  $('sas').textContent = String(n).padStart(12, '0').replace(/(\d{4})(?=\d)/g, '$1 ');
+  const code = await safetyCodeFor(local, remote);
+  $('sas').textContent = code.display;
   $('security').hidden = false;
 
-  currentCodeId = hex(digest);
+  currentCodeId = code.id;
   const changed = DeviceIdentity.notePeer(roomId, remote);
   if (DeviceIdentity.isVerified(currentCodeId)) showVerifyState('verified');
   else showVerifyState(changed ? 'changed' : 'new');
@@ -181,6 +193,64 @@ $('verify-no').onclick = () => {
   $('hangup').click();
 };
 
+// ---------- admission ("knock to join") ----------
+//
+// When someone else is already in the call, a newcomer waits and sends a knock
+// encrypted with the call key, containing its device fingerprint. The server
+// relays it unread. This browser decides:
+//   - doesn't decrypt         -> not really holding the link: deny
+//   - device seen on this link before, or a verified device -> let in (reconnects need no clicks)
+//   - otherwise               -> ask, showing the safety code they'll get
+
+let pendingKnock = null;
+
+function answerKnock(id, admit) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: admit ? 'admit' : 'deny', id }));
+  if (pendingKnock === id) {
+    pendingKnock = null;
+    $('knock').hidden = true;
+  }
+}
+
+async function handleKnock(msg) {
+  let knock;
+  try {
+    knock = await open(msg.data);
+  } catch {
+    return answerKnock(msg.id, false);
+  }
+  if (!knock.knock) return answerKnock(msg.id, false);
+  const theirs = typeof knock.fp === 'string' ? knock.fp : '';
+  const mine = myFingerprint();
+  const code = theirs && mine ? await safetyCodeFor(mine, theirs) : null;
+  if (code && (DeviceIdentity.isVerified(code.id) || DeviceIdentity.lastPeer(roomId) === theirs)) {
+    return answerKnock(msg.id, true);
+  }
+  pendingKnock = msg.id;
+  $('knock-code').textContent = code ? code.display : 'unavailable';
+  $('knock').hidden = false;
+  setStatus('Someone wants to join');
+  $('knock-admit').focus();
+}
+
+$('knock-admit').onclick = () => pendingKnock && answerKnock(pendingKnock, true);
+$('knock-deny').onclick = () => pendingKnock && answerKnock(pendingKnock, false);
+
+function turnedAway() {
+  leaving = true;
+  clearTimeout(iceTimer);
+  pc && pc.close();
+  localStream && localStream.getTracks().forEach((t) => t.stop());
+  effects && effects.stop();
+  secret = null;
+  history.replaceState(null, '', location.pathname);
+  $('call').hidden = true;
+  $('lobby').hidden = false;
+  $('lobby-invite-slot').append($('invite-form'));
+  setStatus('Not let in');
+  lobbyMsg('The person in this call didn’t let you in. Ask them for a new link if you think this is a mistake.');
+}
+
 // ---------- signaling connection (Python service) ----------
 
 function connect() {
@@ -193,6 +263,21 @@ function connect() {
       if (msg.type === 'joined') {
         reconnectDelay = 1000;
         setStatus(msg.peers === 1 ? 'Waiting for the other person…' : 'Connecting…');
+      } else if (msg.type === 'waiting') {
+        reconnectDelay = 1000;
+        setStatus('Waiting to be let in…');
+        ws.send(JSON.stringify({ type: 'knock', data: await seal({ knock: true, fp: myFingerprint() }) }));
+      } else if (msg.type === 'knock') {
+        await handleKnock(msg);
+      } else if (msg.type === 'knock-cancelled') {
+        if (pendingKnock === msg.id) {
+          pendingKnock = null;
+          $('knock').hidden = true;
+          setStatus('Waiting for the other person…');
+        }
+      } else if (msg.type === 'denied') {
+        full = true; // don't reconnect
+        turnedAway();
       } else if (msg.type === 'peer-joined') {
         setStatus('Connecting…');
         await makeOffer(); // the peer already in the room makes the offer

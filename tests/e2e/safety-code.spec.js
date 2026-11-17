@@ -1,11 +1,12 @@
-const { test, expect, startCall, waitConnected, connectedPair, safetyCode } = require('./helpers');
+const { test, expect, startCall, admit, waitConnected, connectedPair, safetyCode } = require('./helpers');
 
 test('safety code stays the same when the other person reloads and rejoins', async ({ server, newDevice }) => {
   const { a, b, link } = await connectedPair(newDevice, server);
   const code = await safetyCode(a);
 
-  await b.reload();
+  await b.reload(); // known device on this link: let back in without a prompt
   await waitConnected(a, b);
+  await expect(a.locator('#knock')).toBeHidden();
   expect(await safetyCode(a)).toBe(code);
   expect(await safetyCode(b)).toBe(code);
 
@@ -18,6 +19,7 @@ test('safety code stays the same when the other person reloads and rejoins', asy
   const link2 = await startCall(a, server);
   expect(link2).not.toBe(link);
   await b.goto(link2);
+  await admit(a); // new link, not yet verified: A is asked
   await waitConnected(a, b);
   expect(await safetyCode(b)).toBe(code);
 });
@@ -43,6 +45,7 @@ test('warns when the other device changes on the same link', async ({ server, ne
   const b = await newDevice();
   const link = await startCall(a, server);
   await b.goto(link);
+  await admit(a);
   await waitConnected(a, b);
   const first = await safetyCode(a);
 
@@ -50,6 +53,7 @@ test('warns when the other device changes on the same link', async ({ server, ne
   await b.context().close();
   const c = await newDevice();
   await c.goto(link);
+  await admit(a);
   await waitConnected(a, c);
   expect(await safetyCode(a)).not.toBe(first);
   await expect(a.locator('#verify-state')).toContainText('different from last time');
@@ -71,6 +75,7 @@ test('private browsing (no IndexedDB): says so, and the code is still stable wit
   const a = await newDevice({ init: noStorage });
   const b = await newDevice();
   await b.goto(await startCall(a, server));
+  await admit(a);
   await waitConnected(a, b);
   await expect(a.locator('#identity-note')).toBeVisible();
   await expect(b.locator('#identity-note')).toBeHidden();

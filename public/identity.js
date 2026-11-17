@@ -95,6 +95,11 @@ const DeviceIdentity = (() => {
       ls.set('verified-codes', JSON.stringify(list.slice(-MAX_VERIFIED)));
     },
 
+    /** The fingerprint of the last device connected on this call link, if any. */
+    lastPeer(roomId) {
+      return ls.get('peer.' + roomId.slice(0, 32));
+    },
+
     /**
      * Record the peer's fingerprint for this call link. Returns the fingerprint
      * seen last time if it was different, else null.

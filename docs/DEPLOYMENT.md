@@ -60,6 +60,39 @@ Then start a call between two different networks, for example laptop Wi-Fi and a
 an end-to-end TURN check, set `ICE_TRANSPORT_POLICY=relay` in `.env`, run `docker compose up -d`, and make a
 call: it can then only connect through coturn.
 
+## Email deliverability (SPF, DKIM, DMARC)
+
+Invites sent from a domain without email authentication usually land in spam, or are rejected outright by
+Gmail and Outlook. Send through a mail provider such as Postmark, Amazon SES, SendGrid, Mailgun or Google
+Workspace, verify your sending domain there, and add the DNS records it gives you. They look like this for
+`MAIL_FROM=Private Call <invites@example.com>`:
+
+| Type | Name | Value (example; use your provider's) | Purpose |
+|---|---|---|---|
+| TXT | `example.com` | `v=spf1 include:amazonses.com ~all` | **SPF:** which servers may send as your domain. Use one SPF record per domain and merge `include:`s. |
+| TXT or CNAME | `<selector>._domainkey.example.com` | provided by your mail service | **DKIM:** cryptographic signature on each message |
+| TXT | `_dmarc.example.com` | `v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com; adkim=s; aspf=s` | **DMARC:** what receivers do when SPF or DKIM fail, plus reports. Start with `p=none` for a week, then tighten. |
+
+Check with your provider's verification page, or send an invite to a Gmail address and choose *Show
+original*: SPF, DKIM and DMARC should all say `PASS`.
+
+## Monitoring
+
+Set `METRICS_TOKEN` in `.env` to a random value (`openssl rand -hex 32`) to enable `/metrics` for Prometheus:
+
+```yaml
+scrape_configs:
+  - job_name: videoconf
+    scheme: https
+    metrics_path: /metrics
+    authorization: { credentials: <METRICS_TOKEN> }
+    static_configs: [{ targets: ["call.example.com"] }]
+```
+
+Useful alerts: `videoconf_rejections_total{reason="ws_per_ip"}` or `{reason="ws_connect_rate"}` rising
+(someone hammering the server), and `videoconf_invites_total{result="failed"}` above zero (SMTP problems).
+`/healthz` is suitable for an uptime checker.
+
 ## Relay-only mode (hide IP addresses)
 
 By default browsers connect directly when they can, which is fastest. With `ICE_TRANSPORT_POLICY=relay`,

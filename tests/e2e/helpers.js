@@ -88,12 +88,20 @@ async function waitConnected(...pages) {
   for (const p of pages) await expect(p.locator('#status')).toHaveText(/^Connected/);
 }
 
+/** The host lets in the person knocking (a device it hasn't seen on this link). */
+async function admit(host) {
+  await expect(host.locator('#knock')).toBeVisible();
+  await host.click('#knock-admit');
+  await expect(host.locator('#knock')).toBeHidden();
+}
+
 /** Two devices in a connected call. */
 async function connectedPair(newDevice, server) {
   const a = await newDevice();
   const b = await newDevice();
   const link = await startCall(a, server);
   await b.goto(link);
+  await admit(a);
   await waitConnected(a, b);
   return { a, b, link };
 }
@@ -120,4 +128,4 @@ function sampleRemote(page) {
   });
 }
 
-module.exports = { test, expect, PyServer, startCall, waitConnected, connectedPair, safetyCode, sampleRemote };
+module.exports = { test, expect, PyServer, startCall, admit, waitConnected, connectedPair, safetyCode, sampleRemote };

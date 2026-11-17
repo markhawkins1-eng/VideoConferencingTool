@@ -113,34 +113,90 @@ def test_room_status(client):
     assert client.get("/api/v1/rooms/not-a-room").status_code == 400
 
 
-def test_two_peers_relay_and_third_is_refused(client):
-    with client.websocket_connect(f"/api/v1/rooms/{ROOM}/ws") as a:
-        assert a.receive_json() == {"type": "joined", "peers": 1}
-        with client.websocket_connect(f"/api/v1/rooms/{ROOM}/ws") as b:
-            assert b.receive_json() == {"type": "joined", "peers": 2}
-            assert a.receive_json() == {"type": "peer-joined"}
-            assert client.get(f"/api/v1/rooms/{ROOM}").json()["joinable"] is False
+WS = f"/api/v1/rooms/{ROOM}/ws"
 
-            a.send_json({"type": "signal", "data": "ciphertext-1"})
-            assert b.receive_json() == {"type": "signal", "data": "ciphertext-1"}
-            b.send_json({"type": "signal", "data": "ciphertext-2"})
-            assert a.receive_json() == {"type": "signal", "data": "ciphertext-2"}
 
-            with client.websocket_connect(f"/api/v1/rooms/{ROOM}/ws") as c:
-                assert c.receive_json() == {"type": "full"}
-                with pytest.raises(WebSocketDisconnect) as exc:
-                    c.receive_json()
-                assert exc.value.code == 4409
+def host_and_guest(client, a, b):
+    """a is admitted as host; b waits, knocks, and is let in."""
+    assert a.receive_json() == {"type": "joined", "peers": 1, "host": True}
+    assert b.receive_json() == {"type": "waiting"}
+    b.send_json({"type": "knock", "data": "encrypted-knock"})
+    knock = a.receive_json()
+    assert knock["type"] == "knock" and knock["data"] == "encrypted-knock"
+    a.send_json({"type": "admit", "id": knock["id"]})
+    assert b.receive_json() == {"type": "joined", "peers": 2, "host": False}
+    assert a.receive_json() == {"type": "peer-joined"}
+
+
+def test_knock_admit_relay_and_third_is_refused(client):
+    with client.websocket_connect(WS) as a, client.websocket_connect(WS) as b:
+        host_and_guest(client, a, b)
+        assert client.get(f"/api/v1/rooms/{ROOM}").json()["joinable"] is False
+
+        a.send_json({"type": "signal", "data": "ciphertext-1"})
+        assert b.receive_json() == {"type": "signal", "data": "ciphertext-1"}
+        b.send_json({"type": "signal", "data": "ciphertext-2"})
+        assert a.receive_json() == {"type": "signal", "data": "ciphertext-2"}
+
+        with client.websocket_connect(WS) as c:
+            assert c.receive_json() == {"type": "full"}
+            with pytest.raises(WebSocketDisconnect) as exc:
+                c.receive_json()
+            assert exc.value.code == 4409
+        b.close()
         assert a.receive_json() == {"type": "peer-left"}
     assert client.get("/healthz").json()["activeRooms"] == 0
 
 
+def test_waiting_peer_cannot_signal_or_admit_itself(client):
+    with client.websocket_connect(WS) as a, client.websocket_connect(WS) as b:
+        a.receive_json(); b.receive_json()
+        b.send_json({"type": "signal", "data": "sneaky"})          # not admitted: dropped
+        b.send_json({"type": "admit", "id": "anything"})           # not a member: ignored
+        b.send_json({"type": "knock", "data": "k"})
+        knock = a.receive_json()
+        assert knock["type"] == "knock"                            # 'sneaky' never arrived
+        assert client.get("/healthz").json()["waitingPeers"] == 1
+
+
+def test_deny_closes_guest(client):
+    with client.websocket_connect(WS) as a, client.websocket_connect(WS) as b:
+        a.receive_json(); b.receive_json()
+        b.send_json({"type": "knock", "data": "k"})
+        guest = a.receive_json()["id"]
+        a.send_json({"type": "deny", "id": guest})
+        assert b.receive_json() == {"type": "denied"}
+        with pytest.raises(WebSocketDisconnect) as exc:
+            b.receive_json()
+        assert exc.value.code == 4403
+    assert client.get("/healthz").json()["activeRooms"] == 0
+
+
+def test_knock_cancelled_when_guest_leaves(client):
+    with client.websocket_connect(WS) as a:
+        a.receive_json()
+        with client.websocket_connect(WS) as b:
+            b.receive_json()
+            b.send_json({"type": "knock", "data": "k"})
+            guest = a.receive_json()["id"]
+        assert a.receive_json() == {"type": "knock-cancelled", "id": guest}
+
+
+def test_waiting_peer_promoted_when_host_leaves(client):
+    with client.websocket_connect(WS) as host:
+        host.receive_json()
+        with client.websocket_connect(WS) as guest:
+            assert guest.receive_json() == {"type": "waiting"}
+            host.close()
+            assert guest.receive_json() == {"type": "joined", "peers": 1, "host": True}
+
+
 def test_signal_not_echoed_and_junk_ignored(client):
-    with client.websocket_connect(f"/api/v1/rooms/{ROOM}/ws") as a, \
-         client.websocket_connect(f"/api/v1/rooms/{ROOM}/ws") as b:
-        a.receive_json(); a.receive_json(); b.receive_json()
+    with client.websocket_connect(WS) as a, client.websocket_connect(WS) as b:
+        host_and_guest(client, a, b)
         a.send_json({"type": "join", "room": "x"})        # unknown type: ignored
         a.send_json({"type": "signal", "data": {"x": 1}})  # non-string data: ignored
+        a.send_json([1, 2, 3])                             # not an object: ignored
         a.send_json({"type": "signal", "data": "ok"})
         assert b.receive_json() == {"type": "signal", "data": "ok"}
 
@@ -150,10 +206,50 @@ def test_ws_rejects_bad_room_and_foreign_origin(client):
         with client.websocket_connect("/api/v1/rooms/xyz/ws") as ws:
             ws.receive_json()
     with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect(f"/api/v1/rooms/{ROOM}/ws", headers={"origin": "https://evil.example"}) as ws:
+        with client.websocket_connect(WS, headers={"origin": "https://evil.example"}) as ws:
             ws.receive_json()
-    with client.websocket_connect(f"/api/v1/rooms/{ROOM}/ws", headers={"origin": "http://testserver"}) as ws:
+    with client.websocket_connect(WS, headers={"origin": "http://testserver"}) as ws:
         assert ws.receive_json()["type"] == "joined"
+
+
+# ---------- abuse limits and metrics ----------
+
+def test_concurrent_connections_per_ip_capped():
+    c = make_client(ws_per_ip=2)
+    rooms = [f"{i:064x}" for i in range(3)]
+    with c.websocket_connect(f"/api/v1/rooms/{rooms[0]}/ws") as w1, \
+         c.websocket_connect(f"/api/v1/rooms/{rooms[1]}/ws") as w2:
+        w1.receive_json(); w2.receive_json()
+        with pytest.raises(WebSocketDisconnect):
+            with c.websocket_connect(f"/api/v1/rooms/{rooms[2]}/ws") as w3:
+                w3.receive_json()
+    with c.websocket_connect(f"/api/v1/rooms/{rooms[2]}/ws") as w3:  # slots freed on close
+        assert w3.receive_json()["type"] == "joined"
+
+
+def test_connect_rate_and_room_check_rate():
+    c = make_client(ws_connects_per_minute=2, room_checks_per_minute=2)
+    for _ in range(2):
+        with c.websocket_connect(WS) as w:
+            w.receive_json()
+    with pytest.raises(WebSocketDisconnect):
+        with c.websocket_connect(WS) as w:
+            w.receive_json()
+    codes = [c.get(f"/api/v1/rooms/{ROOM}").status_code for _ in range(3)]
+    assert codes == [200, 200, 429]
+
+
+def test_metrics_need_token():
+    assert make_client().get("/metrics").status_code == 404
+    c = make_client(metrics_token="t0ken", mail_log=True)
+    assert c.get("/metrics", headers={"authorization": "Bearer wrong"}).status_code == 404
+    c.post("/api/v1/invites", json={"to": "a@example.com", "secret": SECRET})
+    with c.websocket_connect(WS) as a, c.websocket_connect(WS) as b:
+        host_and_guest(c, a, b)
+        body = c.get("/metrics", headers={"authorization": "Bearer t0ken"}).text
+    assert "videoconf_connected_peers 2" in body
+    assert "videoconf_admissions_total 1" in body
+    assert 'videoconf_invites_total{result="sent"} 1' in body
 
 
 # ---------- invites ----------

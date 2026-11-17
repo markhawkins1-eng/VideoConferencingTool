@@ -1,4 +1,4 @@
-const { test, expect, startCall, waitConnected, safetyCode } = require('./helpers');
+const { test, expect, startCall, admit, waitConnected, safetyCode } = require('./helpers');
 
 test('email invite: link joins an encrypted call with matching safety codes', async ({ server, newDevice }) => {
   const a = await newDevice();
@@ -14,6 +14,7 @@ test('email invite: link joins an encrypted call with matching safety codes', as
 
   const b = await newDevice();
   await b.goto(server.lastInviteLink());
+  await admit(a);
   await waitConnected(a, b);
   expect(await safetyCode(a)).toMatch(/^\d{4} \d{4} \d{4}$/);
   expect(await safetyCode(a)).toBe(await safetyCode(b));
@@ -36,6 +37,7 @@ test('a third person is told the call is full without a camera prompt', async ({
   const b = await newDevice();
   const link = await startCall(a, server);
   await b.goto(link);
+  await admit(a);
   await waitConnected(a, b);
 
   const c = await newDevice({
@@ -54,6 +56,7 @@ test('call survives a server restart and signaling reconnects', async ({ server,
   const a = await newDevice();
   const b = await newDevice();
   await b.goto(await startCall(a, server));
+  await admit(a);
   await waitConnected(a, b);
   const code = await safetyCode(a);
 
@@ -68,6 +71,9 @@ test('call survives a server restart and signaling reconnects', async ({ server,
   await expect.poll(async () => (await server.health()).connectedPeers, { timeout: 30_000 }).toBe(2);
   await waitConnected(a, b);
   expect(await safetyCode(a)).toBe(code); // stable device identity: same code after renegotiation
+  // Whoever reconnected second knocked and was let back in automatically (known device).
+  await expect(a.locator('#knock')).toBeHidden();
+  await expect(b.locator('#knock')).toBeHidden();
 });
 
 test('shows a clear message when the server is unreachable', async ({ server, newDevice }) => {

@@ -103,7 +103,7 @@ Cross-browser details handled in `public/effects.js`:
 | Media | Browsers | WebRTC DTLS-SRTP, sent directly between the two browsers. TURN, if used, relays only ciphertext. |
 | Signaling | Browsers encrypt; Python relays | AES-256-GCM with a key derived (HKDF) from a 128-bit secret in the link's `#fragment`. The server sees only an opaque room ID and ciphertext. |
 | Verification | Users | A 12-digit safety code from both DTLS fingerprints. Each browser keeps one long-lived certificate, so the code is the same every time for the same two devices. **Codes match** is remembered, and a changed code shows a warning. |
-| Admission | Python | Two people per call. Guests learn a call is full before being asked for their camera. |
+| Admission | Python enforces; host's browser decides | Two people per call. Newcomers knock and the person already in the call lets them in. Known or verified devices are let in automatically, and anyone without the real link is refused. Guests learn a call is full before being asked for their camera. |
 
 **Email trade-off:** with **Send invite**, the call link passes through the server once so it can be emailed.
 **Use my email app** keeps it off the server completely. Either way, compare the safety code.
@@ -128,6 +128,8 @@ More detail, including server hardening, is in [docs/ARCHITECTURE.md](docs/ARCHI
 | `MAIL_FROM` | Sender, such as `Private Call <invites@example.com>` |
 | `MAIL_LOG=1` | Development: print invites instead of sending them |
 | `INVITE_LIMIT` | Invites per IP per 15 minutes. Default 5 |
+| `WS_PER_IP`, `WS_CONNECTS_PER_MINUTE`, `ROOM_CHECKS_PER_MINUTE` | Per-IP abuse limits. Defaults 20, 60, 120 |
+| `METRICS_TOKEN` | Enables Prometheus metrics at `/metrics`, requiring `Authorization: Bearer <token>` |
 
 If neither `SMTP_HOST` nor `MAIL_LOG` is set, **Send invite** is hidden and only **Use my email app** is offered.
 

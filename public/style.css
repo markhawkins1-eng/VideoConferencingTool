@@ -62,3 +62,5 @@ button:disabled { opacity:.6; cursor:default; }
 .security.warn { border-color:var(--danger); box-shadow:0 0 0 1px var(--danger); }
 #verify-actions { margin:6px 0; }
 [hidden] { display:none !important; }
+.knock { display:flex; flex-wrap:wrap; gap:12px; justify-content:space-between; align-items:center; border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+.sas-sm { font:600 1rem ui-monospace, monospace; letter-spacing:.06em; white-space:nowrap; }

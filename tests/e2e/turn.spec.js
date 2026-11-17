@@ -1,7 +1,7 @@
 // Runs a real coturn server and checks that, with ICE_TRANSPORT_POLICY=relay,
 // calls connect only through TURN using the short-lived credentials the Python
 // server issues, and that a wrong shared secret is rejected.
-const { test: base, expect, startCall, waitConnected, safetyCode } = require('./helpers');
+const { test: base, expect, startCall, admit, waitConnected, safetyCode } = require('./helpers');
 const { spawn, execFileSync } = require('child_process');
 
 const SECRET = 'test-turn-secret-' + Math.random().toString(36).slice(2);
@@ -75,6 +75,7 @@ test.describe('relay-only through coturn', () => {
     const a = await newDevice();
     const b = await newDevice();
     await b.goto(await startCall(a, server));
+    await admit(a);
     await waitConnected(a, b);
     expect(await safetyCode(a)).toBe(await safetyCode(b));
     expect(await selectedCandidateTypes(a)).toEqual({ local: 'relay', remote: 'relay' });
@@ -97,6 +98,7 @@ test.describe('relay-only through coturn', () => {
     const a = await newDevice();
     const b = await newDevice();
     await b.goto(await startCall(a, server));
+    await admit(a);
     await expect(a.locator('#status')).toHaveText(/Connecting|Connection failed/);
     await a.waitForTimeout(6000);
     await expect(a.locator('#status')).not.toHaveText(/^Connected/);

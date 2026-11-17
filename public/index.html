@@ -21,6 +21,17 @@
   </section>
 
   <section id="call" hidden>
+    <div id="knock" class="card knock" role="alertdialog" aria-labelledby="knock-title" hidden>
+      <div>
+        <strong id="knock-title">Someone with the link wants to join.</strong>
+        <p class="hint">If you let them in, your safety code will be <span id="knock-code" class="sas-sm"></span>.
+          Check it with them once you’re connected.</p>
+      </div>
+      <div class="actions">
+        <button id="knock-admit" class="primary">Let them in</button>
+        <button id="knock-deny" class="danger">Deny</button>
+      </div>
+    </div>
     <div class="videos">
       <figure><video id="remote" autoplay playsinline></video><figcaption>Peer</figcaption></figure>
       <figure class="self"><video id="local" autoplay playsinline muted></video><figcaption>You</figcaption></figure>

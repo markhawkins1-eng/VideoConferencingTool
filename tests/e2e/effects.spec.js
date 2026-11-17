@@ -1,6 +1,6 @@
 // The fake camera shows a green test pattern with no person in it, so with a
 // virtual background on, the other side should receive just the background.
-const { test, expect, startCall, connectedPair, sampleRemote } = require('./helpers');
+const { test, expect, startCall, admit, connectedPair, sampleRemote } = require('./helpers');
 
 async function pick(page, selector) {
   await page.click(selector);
@@ -62,6 +62,7 @@ for (const [name, init] of [
     const a = await newDevice({ init });
     const b = await newDevice();
     await b.goto(await startCall(a, server));
+    await admit(a);
     await expect(b.locator('#status')).toHaveText(/^Connected/);
     await receives(b, (f) => f.width > 0 && f.rgb[1] > 120, 'peer sees the green test pattern');
     const plain = await sampleRemote(b);

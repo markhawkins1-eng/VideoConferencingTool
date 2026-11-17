@@ -1,5 +1,7 @@
 """Run the server: python -m videoconf (from the server/ directory)."""
 
+import logging
+
 import uvicorn
 
 from .app import create_app
@@ -7,6 +9,7 @@ from .config import Settings
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = Settings.from_env()
     scheme = "https" if settings.tls_cert else "http"
     print(f"VideoConf listening on {scheme}://localhost:{settings.port}", flush=True)
