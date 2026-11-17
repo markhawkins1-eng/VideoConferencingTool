@@ -191,7 +191,7 @@ const SECURITY_HEADERS = {
   'Content-Security-Policy':
     "default-src 'self'; connect-src 'self' ws: wss:; media-src 'self' blob:; " +
     "img-src 'self' data: blob:; style-src 'self'; script-src 'self' 'wasm-unsafe-eval'; " +
-    "worker-src 'self' blob:; frame-ancestors 'none'",
+    "worker-src 'self' blob:; child-src 'self' blob:; frame-ancestors 'none'",
   'Referrer-Policy': 'no-referrer',
   'X-Content-Type-Options': 'nosniff',
   'Permissions-Policy': 'camera=(self), microphone=(self)',

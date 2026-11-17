@@ -345,7 +345,13 @@ async function applyEffect(choice) {
   } catch (err) {
     console.warn('Effect failed:', err);
     if (seq === effectSeq) {
-      effectsMsg('Background effects aren’t available in this browser. Privacy blur still works.', 'error');
+      effectsMsg(
+        'Background blur and backgrounds couldn’t start in this browser. Privacy blur still works. ' +
+          (/Edg\//.test(navigator.userAgent)
+            ? 'In Microsoft Edge, turning off “Enhanced security” for this site usually fixes this.'
+            : 'Try updating your browser.'),
+        'error',
+      );
       markSelected({ type: 'none' });
     }
     return;
@@ -396,6 +402,12 @@ function tile({ label, type, preset, thumb, cls }) {
 }
 
 function buildEffectsPanel() {
+  const reason = VideoEffects.unsupportedReason();
+  if (reason) {
+    $('effects-toggle').disabled = true;
+    $('effects-toggle').title = 'Effects unavailable: ' + reason;
+    return;
+  }
   const grid = $('effects-grid');
   if (grid.childElementCount) return;
   grid.append(
@@ -466,6 +478,7 @@ $('effects-upload').onchange = async (e) => {
 };
 
 function restoreEffect() {
+  if (VideoEffects.unsupportedReason()) return;
   let saved;
   try { saved = JSON.parse(store.get('effect') || 'null'); } catch {}
   if (!saved || saved.type === 'none') return markSelected({ type: 'none' });

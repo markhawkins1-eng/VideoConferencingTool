@@ -156,35 +156,62 @@ class VideoEffects {
 
   startPipeline() {
     if (this.outputTrack) return;
-    const s = this.cameraTrack.getSettings();
-    const W = (this.W = s.width || 640);
-    const H = (this.H = s.height || 480);
-    const segH = Math.round((SEG_WIDTH * H) / W);
+
+    // Safari (macOS and iOS) can stop decoding, or stop capturing from, video
+    // and canvas elements that aren't in the document. Keep them attached, in
+    // the viewport but effectively invisible.
+    this.host = document.createElement('div');
+    this.host.setAttribute('aria-hidden', 'true');
+    this.host.style.cssText =
+      'position:fixed;right:0;bottom:0;width:2px;height:2px;overflow:hidden;opacity:0.01;pointer-events:none;z-index:-1';
+    document.body.append(this.host);
 
     this.video = document.createElement('video');
     this.video.muted = true;
     this.video.playsInline = true;
+    this.video.setAttribute('playsinline', ''); // iOS needs the attribute, not only the property
+    this.video.setAttribute('muted', '');
+    this.video.autoplay = true;
     this.video.srcObject = new MediaStream([this.cameraTrack]);
+    this.host.append(this.video);
     this.video.play().catch(() => {});
 
+    this.out = document.createElement('canvas');
+    this.host.append(this.out);
+    const s = this.cameraTrack.getSettings();
+    this.resize(s.width || 640, s.height || 480);
+    this.ctx.fillRect(0, 0, this.W, this.H);
+
+    this.outputTrack = this.out.captureStream(30).getVideoTracks()[0];
+    this.outputTrack.enabled = this.cameraTrack.enabled;
+    this.lastTs = 0;
+    this.stopTicker = workerTicker(30, () => this.frame());
+  }
+
+  // (Re)allocate buffers for a W x H camera frame. Called again when the camera
+  // resolution or orientation changes, such as rotating a phone or iPad.
+  resize(W, H) {
+    this.W = W;
+    this.H = H;
+    const segH = Math.max(1, Math.round((SEG_WIDTH * H) / W));
     const mk = (w, h) => Object.assign(document.createElement('canvas'), { width: w, height: h });
-    this.out = mk(W, H);
+    this.out.width = W;
+    this.out.height = H;
     this.person = mk(W, H);
     this.small = mk(SEG_WIDTH, segH);   // segmentation input
     this.mask = mk(SEG_WIDTH, segH);    // person alpha mask
-    this.tiny = mk(Math.max(8, W >> 4), Math.max(6, H >> 4)); // fallback blur
     this.maskData = new ImageData(SEG_WIDTH, segH);
     this.ctx = this.out.getContext('2d');
     this.pctx = this.person.getContext('2d');
     this.sctx = this.small.getContext('2d', { willReadFrequently: true });
     this.mctx = this.mask.getContext('2d');
-    this.hasFilter = typeof this.ctx.filter === 'string';
-
-    this.ctx.fillRect(0, 0, W, H);
-    this.outputTrack = this.out.captureStream(30).getVideoTracks()[0];
-    this.outputTrack.enabled = this.cameraTrack.enabled;
-    this.lastTs = 0;
-    this.stopTicker = workerTicker(30, () => this.frame());
+    this.hasFilter = canvasFilterWorks();
+    // Pyramid of half-size canvases for the blur fallback (Safari has no canvas filters).
+    this.pyramid = [];
+    for (let w = W >> 1, h = H >> 1; w >= 4 && h >= 4 && this.pyramid.length < 7; w >>= 1, h >>= 1) {
+      const c = mk(w, h);
+      this.pyramid.push({ c, x: c.getContext('2d') });
+    }
   }
 
   stopPipeline() {
@@ -193,6 +220,7 @@ class VideoEffects {
     this.outputTrack.stop();
     this.outputTrack = null;
     this.video.srcObject = null;
+    this.host.remove();
   }
 
   stop() {
@@ -204,28 +232,56 @@ class VideoEffects {
   blurInto(ctx, radius) {
     const { W, H, video } = this;
     if (this.hasFilter) {
+      // Chrome, Edge, Firefox: native Gaussian blur.
       ctx.filter = `blur(${radius}px)`;
       // Overdraw slightly so the blur doesn't fade at the edges.
       ctx.drawImage(video, -radius, -radius, W + 2 * radius, H + 2 * radius);
       ctx.filter = 'none';
-    } else {
-      // Browsers without canvas filters: downscale then upscale with smoothing.
-      const t = this.tiny.getContext('2d');
-      t.drawImage(video, 0, 0, this.tiny.width, this.tiny.height);
-      ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(this.tiny, 0, 0, W, H);
+      return;
     }
+    // Safari: approximate a Gaussian by halving the image repeatedly and then
+    // scaling back up one step at a time, with smoothing at every step. The
+    // number of halvings sets the strength (2^levels is about the blur radius).
+    const levels = Math.min(this.pyramid.length, Math.max(1, Math.round(Math.log2(radius))));
+    let src = video, sw = W, sh = H;
+    for (let i = 0; i < levels; i++) {
+      const { c, x } = this.pyramid[i];
+      x.imageSmoothingEnabled = true;
+      x.imageSmoothingQuality = 'high';
+      x.drawImage(src, 0, 0, sw, sh, 0, 0, c.width, c.height);
+      src = c; sw = c.width; sh = c.height;
+    }
+    for (let i = levels - 2; i >= 0; i--) {
+      const { c, x } = this.pyramid[i];
+      x.drawImage(src, 0, 0, sw, sh, 0, 0, c.width, c.height);
+      src = c; sw = c.width; sh = c.height;
+    }
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(src, 0, 0, sw, sh, 0, 0, W, H);
   }
 
   frame() {
     const t0 = performance.now();
-    this.render();
+    try {
+      this.render();
+    } catch (err) {
+      // Never let one bad frame kill the loop; log once.
+      if (!this.loggedError) console.warn('Effects frame failed:', err);
+      this.loggedError = true;
+    }
     this.frameMs = 0.9 * (this.frameMs || 0) + 0.1 * (performance.now() - t0); // for diagnostics
   }
 
   render() {
-    const { video, ctx, W, H, effect } = this;
-    if (!this.outputTrack || video.readyState < 2) return;
+    const { video, effect } = this;
+    if (!this.outputTrack) return;
+    // iOS Safari may pause muted background video (e.g. after a phone call or
+    // when the page is hidden); resume it.
+    if (video.paused) video.play().catch(() => {});
+    if (video.readyState < 2 || !video.videoWidth) return;
+    if (video.videoWidth !== this.W || video.videoHeight !== this.H) this.resize(video.videoWidth, video.videoHeight);
+    const { ctx, W, H } = this;
 
     if (effect.type === 'privacy') {
       this.blurInto(ctx, Math.round(W / 25));
@@ -242,6 +298,7 @@ class VideoEffects {
         if (!m) return;
         const conf = m.getAsFloat32Array();
         const px = this.maskData.data;
+        if (conf.length * 4 !== px.length) return; // frame from before a resize
         for (let i = 0; i < conf.length; i++) {
           // Soft threshold: <0.25 background, >0.75 person, smooth in between.
           const a = Math.min(1, Math.max(0, (conf[i] - 0.25) * 2));
@@ -259,17 +316,49 @@ class VideoEffects {
     }
 
     // Person layer: soft-edged mask, then the camera frame clipped to it.
+    // Without canvas filters (Safari), the low-res mask's bilinear upscale
+    // already gives a soft edge.
     const p = this.pctx;
     p.globalCompositeOperation = 'copy';
     p.imageSmoothingEnabled = true;
+    p.imageSmoothingQuality = 'high';
     if (this.hasFilter) p.filter = 'blur(3px)';
     p.drawImage(this.mask, 0, 0, W, H);
-    p.filter = 'none';
+    if (this.hasFilter) p.filter = 'none';
     p.globalCompositeOperation = 'source-in';
     p.drawImage(video, 0, 0, W, H);
     ctx.drawImage(this.person, 0, 0);
   }
 }
+
+// Does ctx.filter actually blur? Some Safari versions expose the property but
+// ignore it, so test the effect rather than the property.
+let filterWorks;
+function canvasFilterWorks() {
+  if (filterWorks !== undefined) return filterWorks;
+  try {
+    const src = Object.assign(document.createElement('canvas'), { width: 9, height: 1 });
+    const sx = src.getContext('2d');
+    sx.fillStyle = '#fff';
+    sx.fillRect(4, 0, 1, 1);
+    const dst = Object.assign(document.createElement('canvas'), { width: 9, height: 1 });
+    const dx = dst.getContext('2d');
+    if (typeof dx.filter !== 'string') return (filterWorks = false);
+    dx.filter = 'blur(2px)';
+    dx.drawImage(src, 0, 0);
+    filterWorks = dx.getImageData(2, 0, 1, 1).data[3] > 0; // blur spread alpha to the neighbour
+  } catch {
+    filterWorks = false;
+  }
+  return filterWorks;
+}
+
+/** Can this browser run effects at all? Returns null if yes, else a reason. */
+VideoEffects.unsupportedReason = function () {
+  if (typeof HTMLCanvasElement.prototype.captureStream !== 'function') return 'This browser can’t send processed video.';
+  if (typeof WebAssembly !== 'object') return 'This browser doesn’t support WebAssembly.';
+  return null;
+};
 
 window.VideoEffects = VideoEffects;
 window.renderEffectPreset = renderPreset;
