@@ -30,6 +30,25 @@ npm start
 You can also invite someone after the call starts (**Invite someone** below the controls), or skip email with
 **Start without inviting** and copy the link.
 
+## Video effects
+
+Click **Effects** during a call:
+
+- **Blur** / **Strong blur**: blurs everything behind you.
+- **Privacy blur**: blurs the whole picture, you included. Useful when you want to be present without being seen clearly.
+- **Virtual backgrounds**: Soft gradient, Sunset, Night sky or Office, drawn in the browser with no image downloads.
+- **Upload image**: use your own photo as a background. It's resized and kept only in your browser,
+  never uploaded. Remove it with the × on its tile.
+
+Your choice is remembered for the next call. Turning the camera off sends black, not your background.
+
+How it works: [MediaPipe](https://ai.google.dev/edge/mediapipe) selfie segmentation (`@mediapipe/tasks-vision`, pinned, plus
+`models/selfie_segmenter.tflite`, both Apache-2.0) finds you in each frame. A canvas combines you with the
+blurred or replacement background, and that canvas becomes the outgoing video track, swapped in with
+`replaceTrack` without reconnecting. The library and model are served from this server, not a CDN, and
+everything runs on the device. The model runs on the CPU at 256×144, roughly 10–30 ms per frame. On
+slow devices frames are dropped rather than freezing the page.
+
 ## How it's secured
 
 | Layer | Protection |

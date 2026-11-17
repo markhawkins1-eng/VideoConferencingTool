@@ -36,7 +36,20 @@
     <div class="controls">
       <button id="mute">Mute</button>
       <button id="camera">Camera off</button>
+      <button id="effects-toggle" aria-expanded="false" aria-controls="effects-panel">Effects</button>
       <button id="hangup" class="danger">Hang up</button>
+    </div>
+
+    <div id="effects-panel" class="card" hidden>
+      <div class="effects-head">
+        <strong>Background &amp; effects</strong>
+        <label class="upload">Upload image
+          <input id="effects-upload" type="file" accept="image/*">
+        </label>
+      </div>
+      <div id="effects-grid" class="effects-grid"></div>
+      <p id="effects-msg" class="hint" role="status"></p>
+      <p class="hint">Effects run on your device. Uploaded images stay in this browser and are never sent to the server.</p>
     </div>
 
     <details id="invite-panel" class="card">
@@ -67,6 +80,7 @@
     <p id="invite-msg" class="hint" role="status"></p>
   </form>
 
+  <script src="effects.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

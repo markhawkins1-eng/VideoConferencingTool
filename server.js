@@ -167,13 +167,31 @@ async function handleInvite(req, res) {
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
+  '.wasm': 'application/wasm',
+  '.tflite': 'application/octet-stream',
 };
+
+// Background effects run entirely in the browser with MediaPipe. Its code and
+// model are served from this origin (no third-party CDN), and only these exact
+// files are exposed.
+const TASKS_VISION = path.join(__dirname, 'node_modules', '@mediapipe', 'tasks-vision');
+const VENDOR_FILES = {
+  '/vendor/tasks-vision/vision_bundle.mjs': path.join(TASKS_VISION, 'vision_bundle.mjs'),
+  '/models/selfie_segmenter.tflite': path.join(__dirname, 'models', 'selfie_segmenter.tflite'),
+};
+for (const f of ['vision_wasm_internal', 'vision_wasm_nosimd_internal', 'vision_wasm_module_internal']) {
+  for (const ext of ['.js', '.wasm']) {
+    VENDOR_FILES[`/vendor/tasks-vision/wasm/${f}${ext}`] = path.join(TASKS_VISION, 'wasm', f + ext);
+  }
+}
 
 const SECURITY_HEADERS = {
   'Content-Security-Policy':
     "default-src 'self'; connect-src 'self' ws: wss:; media-src 'self' blob:; " +
-    "img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'",
+    "img-src 'self' data: blob:; style-src 'self'; script-src 'self' 'wasm-unsafe-eval'; " +
+    "worker-src 'self' blob:; frame-ancestors 'none'",
   'Referrer-Policy': 'no-referrer',
   'X-Content-Type-Options': 'nosniff',
   'Permissions-Policy': 'camera=(self), microphone=(self)',
@@ -188,9 +206,10 @@ function handleHttp(req, res) {
     if (req.method !== 'POST') return json(res, 405, { error: 'POST only' });
     return handleInvite(req, res);
   }
+  const vendor = VENDOR_FILES[url.pathname];
   const rel = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
-  const file = path.join(PUBLIC_DIR, path.normalize(rel));
-  if (!file.startsWith(PUBLIC_DIR + path.sep)) {
+  const file = vendor || path.join(PUBLIC_DIR, path.normalize(rel));
+  if (!vendor && !file.startsWith(PUBLIC_DIR + path.sep)) {
     res.writeHead(403);
     return res.end();
   }
@@ -201,6 +220,7 @@ function handleHttp(req, res) {
     }
     res.writeHead(200, {
       'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
+      ...(vendor ? { 'Cache-Control': 'public, max-age=86400' } : {}),
       ...SECURITY_HEADERS,
     });
     res.end(data);
