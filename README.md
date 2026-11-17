@@ -49,6 +49,27 @@ blurred or replacement background, and that canvas becomes the outgoing video tr
 everything runs on the device. The model runs on the CPU at 256×144, roughly 10–30 ms per frame. On
 slow devices frames are dropped rather than freezing the page.
 
+### Browser support
+
+| Browser | Effects |
+|---|---|
+| Chrome, Microsoft Edge (current versions) | Everything, with the browser's built-in blur. |
+| Safari 16.4+ (macOS, iPhone, iPad) | Everything. Safari has no canvas blur filter, so a smooth multi-step scaling blur is used instead. |
+| Firefox | Everything, with the built-in blur. |
+
+Cross-browser details handled in `public/effects.js`:
+- **Blur:** the code checks whether canvas filters actually work, not just whether they exist, because some
+  Safari versions expose `ctx.filter` and ignore it. If they don't, it falls back to the scaling blur.
+- **Hidden video:** the processing video and canvas stay attached to the page (invisible), with
+  `playsinline` set, because Safari can stop decoding or capturing elements that aren't in the page. If iOS
+  pauses the hidden video, it's resumed.
+- **Rotation:** a change in camera resolution or orientation, such as rotating a phone or iPad, is picked up
+  mid-call.
+- **Edge enhanced security:** that mode can block WebAssembly. If background detection can't load, the
+  page says so (with the Edge setting to change) and **Privacy blur** keeps working, since it doesn't need it.
+- **No effects support:** browsers that can't send processed video get a disabled **Effects** button
+  instead of an error. The legacy pre-Chromium Edge is not supported.
+
 ## How it's secured
 
 | Layer | Protection |
