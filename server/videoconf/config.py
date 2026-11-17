@@ -38,6 +38,9 @@ class Settings:
     turn_username: str | None = None    # or fixed credentials
     turn_credential: str | None = None
     turn_ttl: int = 6 * 3600
+    # "relay": browsers send media only through TURN, so neither side learns the
+    # other's IP address. Needs a TURN server. "all" (default) prefers direct paths.
+    ice_transport_policy: str = "all"
 
     smtp_host: str | None = None
     smtp_port: int = 587
@@ -53,6 +56,12 @@ class Settings:
     models_dir: Path = REPO_ROOT / "models"
     node_modules_dir: Path = REPO_ROOT / "node_modules"
 
+    def __post_init__(self) -> None:
+        if self.ice_transport_policy not in ("all", "relay"):
+            raise ValueError("ICE_TRANSPORT_POLICY must be 'all' or 'relay'")
+        if self.ice_transport_policy == "relay" and not self.turn_urls:
+            raise ValueError("ICE_TRANSPORT_POLICY=relay needs TURN_URLS (and TURN_SECRET or TURN_USERNAME)")
+
     @property
     def email_enabled(self) -> bool:
         return bool(self.smtp_host) or self.mail_log
@@ -66,12 +75,15 @@ class Settings:
             tls_key=_env("TLS_KEY"),
             public_url=(_env("PUBLIC_URL", "") or "").rstrip("/"),
             trust_proxy=_env("TRUST_PROXY") == "1",
-            stun_urls=_list("STUN_URLS", _env("STUN_URL", "stun:stun.l.google.com:19302")),
+            # STUN_URLS=none disables STUN (e.g. relay-only deployments).
+            stun_urls=[] if _env("STUN_URLS") == "none"
+            else _list("STUN_URLS", _env("STUN_URL", "stun:stun.l.google.com:19302")),
             turn_urls=_list("TURN_URLS", _env("TURN_URL", "")),
             turn_secret=_env("TURN_SECRET"),
             turn_username=_env("TURN_USERNAME"),
             turn_credential=_env("TURN_CREDENTIAL"),
             turn_ttl=int(_env("TURN_TTL", str(6 * 3600))),
+            ice_transport_policy=_env("ICE_TRANSPORT_POLICY", "all"),
             smtp_host=_env("SMTP_HOST"),
             smtp_port=int(_env("SMTP_PORT", "587")),
             smtp_user=_env("SMTP_USER"),

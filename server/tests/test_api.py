@@ -69,7 +69,22 @@ def test_no_path_traversal(client):
 
 def test_ice_servers_stun_only(client):
     body = client.get("/api/v1/ice-servers").json()
-    assert body == {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}], "ttl": None}
+    assert body == {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}], "ttl": None,
+                    "iceTransportPolicy": "all"}
+
+
+def test_stun_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("STUN_URLS", "none")
+    assert Settings.from_env().stun_urls == []
+
+
+def test_relay_only_policy():
+    c = make_client(turn_urls=["turn:t.example.com:3478"], turn_secret="x", ice_transport_policy="relay")
+    assert c.get("/api/v1/ice-servers").json()["iceTransportPolicy"] == "relay"
+    with pytest.raises(ValueError):
+        Settings(ice_transport_policy="relay")  # relay without TURN would never connect
+    with pytest.raises(ValueError):
+        Settings(ice_transport_policy="sometimes")
 
 
 def test_turn_rest_credentials_verify_like_coturn():

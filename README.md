@@ -8,6 +8,7 @@ One-to-one, end-to-end encrypted video calls in the browser, with email invites 
   server can't see or hear calls.
 
 Design, call flow, encryption model and API reference: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+Production setup with HTTPS and your own TURN server: **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
 
 ## Run
 
@@ -36,8 +37,14 @@ TURN_URLS=turn:turn.example.com:3478 TURN_SECRET=... \
 
 ```bash
 .venv/bin/pip install -r server/requirements-dev.txt
-cd server && ../.venv/bin/python -m pytest
+(cd server && ../.venv/bin/python -m pytest)      # Python service
+npx playwright install chromium                   # once
+npx playwright test --trace off                   # browser tests; each starts its own Python server
 ```
+
+The TURN tests need coturn installed (`apt install coturn`) and are skipped without it. GitHub Actions
+(`.github/workflows/ci.yml`) runs all of the above, plus a Docker build and deploy-config check, on every
+pull request.
 
 ## Using it
 
@@ -95,7 +102,7 @@ Cross-browser details handled in `public/effects.js`:
 |---|---|---|
 | Media | Browsers | WebRTC DTLS-SRTP, sent directly between the two browsers. TURN, if used, relays only ciphertext. |
 | Signaling | Browsers encrypt; Python relays | AES-256-GCM with a key derived (HKDF) from a 128-bit secret in the link's `#fragment`. The server sees only an opaque room ID and ciphertext. |
-| Verification | Users | A 12-digit safety code from both DTLS fingerprints. Matching codes mean no one is intercepting. |
+| Verification | Users | A 12-digit safety code from both DTLS fingerprints. Each browser keeps one long-lived certificate, so the code is the same every time for the same two devices. **Codes match** is remembered, and a changed code shows a warning. |
 | Admission | Python | Two people per call. Guests learn a call is full before being asked for their camera. |
 
 **Email trade-off:** with **Send invite**, the call link passes through the server once so it can be emailed.
@@ -111,11 +118,12 @@ More detail, including server hardening, is in [docs/ARCHITECTURE.md](docs/ARCHI
 | `TLS_CERT`, `TLS_KEY` | PEM files for HTTPS |
 | `PUBLIC_URL` | Base URL for invite links and allowed WebSocket origin behind a proxy |
 | `TRUST_PROXY=1` | Trust `X-Forwarded-*` headers for client IP and scheme |
-| `STUN_URLS` | Comma-separated. Default Google STUN |
+| `STUN_URLS` | Comma-separated, or `none`. Default Google STUN; use your own coturn in production |
 | `TURN_URLS` | Comma-separated TURN URLs, such as `turn:turn.example.com:3478,turns:turn.example.com:5349` |
 | `TURN_SECRET` | coturn `static-auth-secret`, used to issue short-lived credentials (recommended) |
 | `TURN_USERNAME`, `TURN_CREDENTIAL` | Fixed TURN credentials, used instead of `TURN_SECRET` |
 | `TURN_TTL` | TURN credential lifetime in seconds. Default 6 hours |
+| `ICE_TRANSPORT_POLICY` | `all` (default) or `relay`: send all media through TURN so neither side learns the other's IP address |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` | Outgoing mail. Port 465 uses implicit TLS; others require STARTTLS |
 | `MAIL_FROM` | Sender, such as `Private Call <invites@example.com>` |
 | `MAIL_LOG=1` | Development: print invites instead of sending them |

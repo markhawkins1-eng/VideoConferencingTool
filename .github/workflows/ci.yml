@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # The server serves the effects assets from node_modules; the tests check them.
+      - run: npm ci --omit=dev
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: server/requirements-dev.txt
+      - run: pip install -r server/requirements-dev.txt
+      - run: python -m pytest -q
+        working-directory: server
+
+  e2e:
+    name: Browser tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: server/requirements.txt
+      - name: Install server
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r server/requirements.txt
+      - run: npx playwright install --with-deps chromium
+      - name: Install coturn (for the TURN relay tests)
+        run: sudo apt-get update -q && sudo apt-get install -y -q coturn
+      - run: npx playwright test --trace off
+        env:
+          CI: "1"
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results
+          path: test-results/
+          retention-days: 7
+
+  docker:
+    name: Container image and deploy config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate docker-compose.yml
+        working-directory: deploy
+        run: |
+          printf 'DOMAIN=call.example.com\nPUBLIC_IP=203.0.113.10\nTURN_SECRET=ci\n' > .env
+          docker compose config --quiet
+      - name: Validate Caddyfile
+        run: docker run --rm -e DOMAIN=call.example.com -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.8.4 caddy validate --config /etc/caddy/Caddyfile
+      - name: Build image
+        run: docker build -t videoconf:ci .
+      - name: Smoke test
+        run: |
+          docker run -d --name vc -p 8443:8443 --read-only --tmpfs /tmp --cap-drop ALL videoconf:ci
+          for i in $(seq 1 20); do curl -fsS localhost:8443/healthz && break; sleep 1; done
+          curl -fsS -o /dev/null localhost:8443/vendor/tasks-vision/wasm/vision_wasm_internal.wasm
+          test "$(docker exec vc id -u)" = 10001

@@ -24,6 +24,7 @@ const myId = b64u.enc(crypto.getRandomValues(new Uint8Array(12)));
 let key, roomId, ws, pc, localStream, config, pendingCandidates = [], statsTimer;
 // sendStream holds what we transmit: mic audio + either the raw camera or the effects-processed video.
 let sendStream, effects;
+let identity = { certificate: null, persistent: false }, iceTransportPolicy = 'all';
 let iceServers = [], iceTimer, reconnectTimer, reconnectDelay = 1000, leaving = false;
 
 function setStatus(text, ok = false) {
@@ -73,7 +74,12 @@ function newPeerConnection() {
   $('security').hidden = true;
   $('remote').srcObject = null;
 
-  pc = new RTCPeerConnection({ iceServers });
+  pc = new RTCPeerConnection({
+    iceServers,
+    iceTransportPolicy,
+    // Reuse this device's long-lived certificate so the safety code stays the same across reconnects and calls.
+    ...(identity.certificate ? { certificates: [identity.certificate] } : {}),
+  });
   sendStream.getTracks().forEach((t) => pc.addTrack(t, sendStream));
 
   pc.onicecandidate = (e) => e.candidate && sendSignal({ candidate: e.candidate.toJSON() });
@@ -120,13 +126,22 @@ function fingerprint(sdp) {
   return m ? m[1].toUpperCase() : '';
 }
 
+let currentCodeId = null;
+
 async function showSecurity() {
-  const fps = [fingerprint(pc.localDescription.sdp), fingerprint(pc.remoteDescription.sdp)].sort();
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode(fps.join('|'))));
+  const local = fingerprint(pc.localDescription.sdp);
+  const remote = fingerprint(pc.remoteDescription.sdp);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', te.encode([local, remote].sort().join('|'))));
   // 48 bits -> 12 decimal digits, shown as 3 groups of 4.
   const n = digest.slice(0, 6).reduce((acc, b) => acc * 256 + b, 0) % 1e12;
   $('sas').textContent = String(n).padStart(12, '0').replace(/(\d{4})(?=\d)/g, '$1 ');
   $('security').hidden = false;
+
+  currentCodeId = hex(digest);
+  const changed = DeviceIdentity.notePeer(roomId, remote);
+  if (DeviceIdentity.isVerified(currentCodeId)) showVerifyState('verified');
+  else showVerifyState(changed ? 'changed' : 'new');
+  $('identity-note').hidden = identity.persistent;
 
   const update = async () => {
     const stats = await pc.getStats();
@@ -140,6 +155,31 @@ async function showSecurity() {
   update();
   statsTimer = setInterval(update, 5000);
 }
+
+const VERIFY_TEXT = {
+  verified: '✓ Verified: you’ve confirmed this code with this person before.',
+  new: 'Not verified yet. Read the code to each other out loud.',
+  changed: '⚠ This code is different from last time on this link. That happens if they switched device or browser, or if someone is intercepting the call. Compare the code again before talking about anything sensitive.',
+};
+
+function showVerifyState(state) {
+  $('verify-state').textContent = VERIFY_TEXT[state];
+  $('verify-state').className = 'verify ' + state;
+  $('verify-actions').hidden = state === 'verified';
+  $('security').classList.toggle('warn', state === 'changed');
+}
+
+$('verify-yes').onclick = () => {
+  if (!currentCodeId) return;
+  DeviceIdentity.markVerified(currentCodeId);
+  showVerifyState('verified');
+};
+
+$('verify-no').onclick = () => {
+  alert('The codes don’t match, so someone may be intercepting this call. The call will end now.\n\n' +
+    'Start a new call and share the link another way, such as in person or by text message.');
+  $('hangup').click();
+};
 
 // ---------- signaling connection (Python service) ----------
 
@@ -182,6 +222,8 @@ function connect() {
 async function refreshIceServers() {
   const res = await VideoConfApi.getIceServers();
   iceServers = res.iceServers;
+  // 'relay' sends media only via TURN, which hides each person's IP address from the other.
+  iceTransportPolicy = res.iceTransportPolicy === 'relay' ? 'relay' : 'all';
   // Short-lived TURN credentials: fetch fresh ones before they expire.
   clearTimeout(iceTimer);
   if (res.ttl) iceTimer = setTimeout(() => refreshIceServers().catch(() => {}), (res.ttl * 1000) / 2);
@@ -206,6 +248,7 @@ async function startCall(s) {
       return false;
     }
     await refreshIceServers();
+    identity = await DeviceIdentity.get();
   } catch (err) {
     setStatus('Server unavailable');
     lobbyMsg(err.message + ' Check your connection and try again.');
@@ -523,6 +566,11 @@ $('effects-toggle').onclick = () => {
   panel.hidden = !panel.hidden;
   $('effects-toggle').setAttribute('aria-expanded', String(!panel.hidden));
 };
+
+// Opening a different call link in a tab that's already on this site only
+// changes the #fragment, which doesn't reload the page. Start over so the new
+// link takes effect. (Our own history.replaceState calls don't fire this.)
+window.addEventListener('hashchange', () => location.reload());
 
 // ---------- boot ----------
 
