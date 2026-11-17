@@ -22,6 +22,8 @@ const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart
 
 const myId = b64u.enc(crypto.getRandomValues(new Uint8Array(12)));
 let key, roomId, ws, pc, localStream, config, pendingCandidates = [], statsTimer;
+// sendStream holds what we transmit: mic audio + either the raw camera or the effects-processed video.
+let sendStream, effects;
 
 function setStatus(text, ok = false) {
   $('status').textContent = text;
@@ -71,7 +73,7 @@ function newPeerConnection() {
   $('remote').srcObject = null;
 
   pc = new RTCPeerConnection({ iceServers: config.iceServers });
-  localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+  sendStream.getTracks().forEach((t) => pc.addTrack(t, sendStream));
 
   pc.onicecandidate = (e) => e.candidate && sendSignal({ candidate: e.candidate.toJSON() });
   pc.ontrack = (e) => ($('remote').srcObject = e.streams[0]);
@@ -190,10 +192,14 @@ async function startCall(s) {
   $('lobby').hidden = true;
   $('call').hidden = false;
   $('call-invite-slot').append($('invite-form'));
-  $('local').srcObject = localStream;
+  sendStream = new MediaStream(localStream.getTracks());
+  effects = new VideoEffects(localStream.getVideoTracks()[0]);
+  $('local').srcObject = new MediaStream(localStream.getVideoTracks());
   $('link').value = location.href;
   newPeerConnection();
   connect();
+  buildEffectsPanel();
+  restoreEffect();
   return true;
 }
 
@@ -291,6 +297,8 @@ $('copy').onclick = async () => {
 function toggleTrack(kind, btn, onLabel, offLabel) {
   const track = localStream.getTracks().find((t) => t.kind === kind);
   track.enabled = !track.enabled;
+  // Also blank the processed video so a virtual background isn't sent with the camera off.
+  if (kind === 'video' && effects && effects.outputTrack) effects.outputTrack.enabled = track.enabled;
   btn.textContent = track.enabled ? onLabel : offLabel;
   btn.setAttribute('aria-pressed', String(!track.enabled));
 }
@@ -301,9 +309,179 @@ $('hangup').onclick = () => {
   ws && ws.close();
   pc && pc.close();
   localStream && localStream.getTracks().forEach((t) => t.stop());
+  effects && effects.stop();
   clearInterval(statsTimer);
   history.replaceState(null, '', location.pathname);
   location.reload();
+};
+
+// ---------- video effects ----------
+
+const store = {
+  get(k) { try { return localStorage.getItem('videoconf.' + k); } catch { return null; } },
+  set(k, v) { try { v == null ? localStorage.removeItem('videoconf.' + k) : localStorage.setItem('videoconf.' + k, v); } catch {} },
+};
+
+let customBg = null;   // canvas holding the user's uploaded background (local only)
+let effectSeq = 0;     // ignore results of superseded effect switches
+
+function effectsMsg(text, kind = '') {
+  $('effects-msg').textContent = text;
+  $('effects-msg').className = 'hint ' + kind;
+}
+
+async function applyEffect(choice) {
+  const seq = ++effectSeq;
+  const effect = { type: choice.type };
+  if (choice.type === 'image') {
+    effect.image = choice.preset ? renderEffectPreset(choice.preset) : customBg;
+    if (!effect.image) return;
+  }
+  markSelected(choice);
+  effectsMsg(VideoEffects.needsSegmentation(effect.type) && !effects.segmenter ? 'Loading background effects…' : '');
+  let track;
+  try {
+    track = await effects.setEffect(effect);
+  } catch (err) {
+    console.warn('Effect failed:', err);
+    if (seq === effectSeq) {
+      effectsMsg('Background effects aren’t available in this browser. Privacy blur still works.', 'error');
+      markSelected({ type: 'none' });
+    }
+    return;
+  }
+  if (seq !== effectSeq) return;
+  effectsMsg('');
+
+  const camera = localStream.getVideoTracks()[0];
+  track.enabled = camera.enabled;
+  const old = sendStream.getVideoTracks()[0];
+  if (old !== track) {
+    sendStream.removeTrack(old);
+    sendStream.addTrack(track);
+    const sender = pc && pc.getSenders().find((s) => s.track && s.track.kind === 'video');
+    if (sender) await sender.replaceTrack(track); // no renegotiation needed
+    $('local').srcObject = new MediaStream([track]);
+    $('local').play().catch(() => {}); // swapping srcObject can leave it paused
+  }
+  store.set('effect', JSON.stringify({ type: choice.type, preset: choice.preset }));
+}
+
+function markSelected(choice) {
+  for (const b of document.querySelectorAll('#effects-grid [data-effect]')) {
+    const on = b.dataset.effect === choice.type && (b.dataset.preset || '') === (choice.preset || '');
+    b.setAttribute('aria-pressed', String(on));
+  }
+}
+
+function tile({ label, type, preset, thumb, cls }) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'tile ' + (cls || '');
+  b.dataset.effect = type;
+  if (preset) b.dataset.preset = preset;
+  b.setAttribute('aria-pressed', 'false');
+  b.title = label;
+  if (thumb) {
+    const img = document.createElement('img');
+    img.alt = '';
+    img.src = thumb;
+    b.append(img);
+  }
+  const span = document.createElement('span');
+  span.textContent = label;
+  b.append(span);
+  b.onclick = () => applyEffect({ type, preset });
+  return b;
+}
+
+function buildEffectsPanel() {
+  const grid = $('effects-grid');
+  if (grid.childElementCount) return;
+  grid.append(
+    tile({ label: 'None', type: 'none', cls: 'icon-none' }),
+    tile({ label: 'Blur', type: 'blur', cls: 'icon-blur' }),
+    tile({ label: 'Strong blur', type: 'blur-strong', cls: 'icon-blur-strong' }),
+    tile({ label: 'Privacy blur', type: 'privacy', cls: 'icon-privacy' }),
+    ...VideoEffects.presets().map((p) =>
+      tile({ label: p.label, type: 'image', preset: p.id, thumb: VideoEffects.presetThumbnail(p.id).toDataURL() })),
+  );
+  const saved = store.get('custom-bg');
+  if (saved) loadCustomBg(saved, false);
+}
+
+function addCustomTile(dataUrl) {
+  const old = document.querySelector('#effects-grid [data-effect="image"]:not([data-preset])');
+  if (old) old.remove();
+  const t = tile({ label: 'Your image', type: 'image', thumb: dataUrl });
+  const rm = document.createElement('span');
+  rm.className = 'tile-remove';
+  rm.textContent = '×';
+  rm.title = 'Remove your image';
+  rm.setAttribute('role', 'button');
+  rm.onclick = (e) => {
+    e.stopPropagation();
+    customBg = null;
+    store.set('custom-bg', null);
+    if (t.getAttribute('aria-pressed') === 'true') applyEffect({ type: 'none' });
+    t.remove();
+  };
+  t.append(rm);
+  $('effects-grid').append(t);
+}
+
+function loadCustomBg(dataUrl, apply) {
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement('canvas');
+    c.width = img.width;
+    c.height = img.height;
+    c.getContext('2d').drawImage(img, 0, 0);
+    customBg = c;
+    addCustomTile(dataUrl);
+    if (apply) applyEffect({ type: 'image' });
+  };
+  img.src = dataUrl;
+}
+
+// Uploaded images are resized in the browser and kept only on this device.
+$('effects-upload').onchange = async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  if (!file.type.startsWith('image/')) return effectsMsg('Please choose an image file.', 'error');
+  try {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, 1280 / bmp.width, 720 / bmp.height);
+    const c = document.createElement('canvas');
+    c.width = Math.round(bmp.width * scale);
+    c.height = Math.round(bmp.height * scale);
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    const dataUrl = c.toDataURL('image/jpeg', 0.85);
+    store.set('custom-bg', dataUrl);
+    loadCustomBg(dataUrl, true);
+  } catch {
+    effectsMsg('Couldn’t read that image.', 'error');
+  }
+};
+
+function restoreEffect() {
+  let saved;
+  try { saved = JSON.parse(store.get('effect') || 'null'); } catch {}
+  if (!saved || saved.type === 'none') return markSelected({ type: 'none' });
+  if (saved.type === 'image' && !saved.preset) {
+    // Custom image loads asynchronously; apply once it's ready.
+    const dataUrl = store.get('custom-bg');
+    if (dataUrl) return loadCustomBg(dataUrl, true);
+    return markSelected({ type: 'none' });
+  }
+  applyEffect(saved);
+}
+
+$('effects-toggle').onclick = () => {
+  const panel = $('effects-panel');
+  panel.hidden = !panel.hidden;
+  $('effects-toggle').setAttribute('aria-expanded', String(!panel.hidden));
 };
 
 // ---------- boot ----------
