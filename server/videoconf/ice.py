@@ -42,4 +42,4 @@ def ice_servers(settings: Settings, now: float | None = None) -> dict[str, Any]:
                 "username": settings.turn_username,
                 "credential": settings.turn_credential or "",
             })
-    return {"iceServers": servers, "ttl": ttl}
+    return {"iceServers": servers, "ttl": ttl, "iceTransportPolicy": settings.ice_transport_policy}

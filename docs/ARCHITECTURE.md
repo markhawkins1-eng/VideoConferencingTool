@@ -118,6 +118,15 @@ automatically.
    ciphers.
 5. **Verification (users):** a 12-digit safety code is computed from both DTLS certificate fingerprints. If it
    matches on both screens, there's no man in the middle, even if the link leaked.
+6. **Stable device identity (browser, `public/identity.js`):** each browser generates one ECDSA P-256 DTLS
+   certificate, stores it in IndexedDB (the private key is non-extractable), and passes it to every
+   `RTCPeerConnection`. The safety code is therefore the same for the same two devices across reconnects
+   and new calls, so it only has to be checked once.
+   - **Codes match** stores the code's full SHA-256 value locally, and later calls show "Verified".
+   - If the other side's fingerprint differs from last time on the same link, the code is flagged as changed:
+     a different device, or interception.
+   - **Codes don't match** ends the call.
+   - Private browsing, where IndexedDB is unavailable, falls back to one certificate per page visit and says so.
 
 **Trade-off of server-sent invites.** To email a link, the server receives the secret once, and the link then
 sits in both mailboxes. Anyone holding it could try to join while a spot is free, and the safety code is what
@@ -132,7 +141,7 @@ The machine-readable schema is at `GET /api/v1/openapi.json`. All responses are 
 |---|---|---|
 | `GET /healthz` | Liveness and counters | `{status, activeRooms, connectedPeers, callsStarted}` |
 | `GET /api/v1/config` | Client feature flags | `{apiVersion, emailEnabled, roomCapacity}` |
-| `GET /api/v1/ice-servers` | STUN/TURN for `RTCPeerConnection` | `{iceServers: [...], ttl: seconds\|null}` |
+| `GET /api/v1/ice-servers` | STUN/TURN for `RTCPeerConnection` | `{iceServers: [...], ttl: seconds\|null, iceTransportPolicy: "all"\|"relay"}` |
 | `GET /api/v1/rooms/{roomId}` | Can this call be joined? | `{roomId, participants, capacity, joinable}` |
 | `POST /api/v1/invites` | Email an invite. Body `{to, fromName?, note?, secret}` | `202 {status: "sent"}`; `400/403/415/429/502/503` |
 | `WS /api/v1/rooms/{roomId}/ws` | Join and signal | see below |
@@ -164,6 +173,8 @@ The machine-readable schema is at `GET /api/v1/openapi.json`. All responses are 
   routing by `roomId` or a shared store such as Redis pub/sub. See "Scaling" below.
 
 ## Deployment
+
+Step-by-step guide and production configs: [DEPLOYMENT.md](DEPLOYMENT.md) (`Dockerfile`, `deploy/`).
 
 ```mermaid
 flowchart LR

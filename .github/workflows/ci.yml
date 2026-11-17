@@ -56,6 +56,8 @@ jobs:
           python -m venv .venv
           .venv/bin/pip install -r server/requirements.txt
       - run: npx playwright install --with-deps chromium
+      - name: Install coturn (for the TURN relay tests)
+        run: sudo apt-get update -q && sudo apt-get install -y -q coturn
       - run: npx playwright test --trace off
         env:
           CI: "1"
@@ -65,3 +67,24 @@ jobs:
           name: playwright-results
           path: test-results/
           retention-days: 7
+
+  docker:
+    name: Container image and deploy config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate docker-compose.yml
+        working-directory: deploy
+        run: |
+          printf 'DOMAIN=call.example.com\nPUBLIC_IP=203.0.113.10\nTURN_SECRET=ci\n' > .env
+          docker compose config --quiet
+      - name: Validate Caddyfile
+        run: docker run --rm -e DOMAIN=call.example.com -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.8.4 caddy validate --config /etc/caddy/Caddyfile
+      - name: Build image
+        run: docker build -t videoconf:ci .
+      - name: Smoke test
+        run: |
+          docker run -d --name vc -p 8443:8443 --read-only --tmpfs /tmp --cap-drop ALL videoconf:ci
+          for i in $(seq 1 20); do curl -fsS localhost:8443/healthz && break; sleep 1; done
+          curl -fsS -o /dev/null localhost:8443/vendor/tasks-vision/wasm/vision_wasm_internal.wasm
+          test "$(docker exec vc id -u)" = 10001
